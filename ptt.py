@@ -435,7 +435,7 @@ def main(cfg: dict, stop: threading.Event) -> None:
                         down.add(nxt.code)
                     elif nxt.value == 0:
                         down.discard(nxt.code)
-                    return nxt.value == 0 and nxt.code in release
+                    return release.isdisjoint(down)
 
                 try:
                     while path is None:
@@ -448,8 +448,10 @@ def main(cfg: dict, stop: threading.Event) -> None:
                         if path is not None or proc is None:
                             break
                         got, _, _ = select.select([dev.fd], [], [], 60)
-                        if not got:
+                        if not got and release.isdisjoint(down):
                             break
+                        if not got:
+                            continue
                         pending = list(dev.read())
                         index = 0
                 finally:
