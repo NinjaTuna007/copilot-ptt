@@ -276,6 +276,13 @@ def ding(cfg: dict) -> None:
 
 
 def hush() -> None:
+    pidfile = STATE / "talkback.pid"
+    if pidfile.exists():
+        try:
+            os.kill(int(pidfile.read_text().strip()), signal.SIGTERM)
+        except (OSError, ValueError):
+            pass
+        pidfile.unlink(missing_ok=True)
     if shutil.which("spd-say") is None:
         return
     subprocess.Popen(
