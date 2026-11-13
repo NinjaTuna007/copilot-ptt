@@ -32,7 +32,7 @@ python3 -m pip install --user faster-whisper
 
 The first start downloads the Whisper small weights. The user service starts again at graphical login.
 
-Hold the Copilot key, speak, release. A speech bubble in the panel is the status icon. Right-click it to change the language or the hotkey.
+Hold the Copilot key, speak, release. A speech bubble in the panel is the status icon. Right-click it to change the language or to add another hotkey. The Copilot key stays on.
 
 Log: `~/.local/state/ptt/ptt.log`
 

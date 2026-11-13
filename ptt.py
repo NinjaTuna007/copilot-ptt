@@ -72,6 +72,7 @@ def keycode(name: str) -> int:
 
 def triggers(cfg: dict) -> tuple[set[int], list[frozenset[int]]]:
     keys = {keycode(name) for name in cfg.get("keys", DEFAULT_KEYS)}
+    keys.add(keycode("F23"))
     chords = [
         frozenset(keycode(name) for name in chord)
         for chord in cfg.get("chords", DEFAULT_CHORDS)
@@ -398,10 +399,10 @@ def main(cfg: dict, stop: threading.Event) -> None:
                             CAPTURE.gesture.clear()
                             CAPTURE.label = "Set hotkey"
                         if len(names) == 1:
-                            cfg["keys"] = names
+                            cfg["keys"] = list(dict.fromkeys(["F23", *names]))
                             cfg["chords"] = []
                         else:
-                            cfg["keys"] = []
+                            cfg["keys"] = ["F23"]
                             cfg["chords"] = [names]
                         save_config(cfg)
                         log("hotkey " + "+".join(names))
