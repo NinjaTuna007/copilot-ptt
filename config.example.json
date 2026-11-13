@@ -2,6 +2,7 @@
   "model": "small",
   "device": "auto",
   "language": "en",
+  "chime": true,
   "keys": ["F23"],
   "chords": [["RIGHTCTRL", "RIGHTSHIFT"]]
 }

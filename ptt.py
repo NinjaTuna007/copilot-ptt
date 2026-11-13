@@ -258,15 +258,20 @@ def paste() -> None:
     x11.XCloseDisplay(disp)
 
 
-def ding() -> None:
-    sound = "/usr/share/sounds/freedesktop/stereo/complete.oga"
-    if os.path.exists(sound):
-        subprocess.Popen(
-            ["pw-play", sound],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+def ding(cfg: dict) -> None:
+    if not cfg.get("chime", True):
+        return
+    sound = cfg.get(
+        "chime_sound", "/usr/share/sounds/freedesktop/stereo/complete.oga"
+    )
+    if not os.path.exists(sound):
+        return
+    subprocess.Popen(
+        ["pw-play", sound],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
 
 
 def start_recording() -> subprocess.Popen:
@@ -526,6 +531,16 @@ def run_tray(cfg: dict, stop: threading.Event) -> None:
 
     hotkey.triggered.connect(arm_hotkey)
     menu.addAction(hotkey)
+    chime = QAction("Chime", menu)
+    chime.setCheckable(True)
+    chime.setChecked(bool(cfg.get("chime", True)))
+
+    def toggle_chime(checked: bool) -> None:
+        cfg["chime"] = bool(checked)
+        save_config(cfg)
+
+    chime.toggled.connect(toggle_chime)
+    menu.addAction(chime)
     menu.addSeparator()
     quit_action = QAction("Quit", menu)
     quit_action.triggered.connect(lambda: (stop.set(), app.quit()))
@@ -547,7 +562,7 @@ def run_tray(cfg: dict, stop: threading.Event) -> None:
                 text = PASTE.get_nowait()
                 if clipboard(text):
                     paste()
-                    ding()
+                    ding(cfg)
         except queue.Empty:
             pass
         with CAPTURE.lock:
@@ -569,6 +584,7 @@ if __name__ == "__main__":
         cfg.setdefault("model", "small")
         cfg.setdefault("device", "auto")
         cfg.setdefault("language", "en")
+        cfg.setdefault("chime", True)
         cfg.setdefault("keys", ["F23"])
         cfg.setdefault("chords", [["RIGHTCTRL", "RIGHTSHIFT"]])
         save_config(cfg)

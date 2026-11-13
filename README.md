@@ -32,7 +32,7 @@ python3 -m pip install --user faster-whisper
 
 The first start downloads the Whisper small weights. The user service starts again at graphical login.
 
-Hold the Copilot key, speak, release. A speech bubble in the panel is the status icon. Right-click it to change the language or to add another hotkey. The Copilot key stays on.
+Hold the Copilot key, speak, release. Right-click the speech bubble for language, power, another hotkey, or to turn the chime off. The chime is the freedesktop sound `complete.oga` if that file is installed. A missing sound is skipped. `"chime_sound"` in the config can point at another file. The Copilot key stays on when another hotkey is set.
 
 Log: `~/.local/state/ptt/ptt.log`
 
