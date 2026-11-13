@@ -27,6 +27,7 @@ CONFIG = Path.home() / ".config/ptt/config.json"
 DEFAULT_KEYS = ("F23",)
 DEFAULT_CHORDS = (("RIGHTCTRL", "RIGHTSHIFT"),)
 PHASE: queue.Queue[str] = queue.Queue()
+PASTE: queue.Queue[str] = queue.Queue()
 XK_CONTROL_L = 0xFFE3
 XK_SHIFT_L = 0xFFE1
 XK_RETURN = 0xFF0D
@@ -264,6 +265,7 @@ def ding() -> None:
             ["pw-play", sound],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
 
 
@@ -312,11 +314,7 @@ def handle_text(model, path: Path, cfg: dict) -> None:
         log("empty")
         return
     log(f"text: {text}")
-    if not clipboard(text):
-        return
-    time.sleep(0.08)
-    paste()
-    ding()
+    PASTE.put(text)
 
 
 def main(cfg: dict, stop: threading.Event) -> None:
@@ -542,6 +540,14 @@ def run_tray(cfg: dict, stop: threading.Event) -> None:
             while True:
                 phase = PHASE.get_nowait()
                 tray.setIcon(ptt_icon(phase))
+        except queue.Empty:
+            pass
+        try:
+            while True:
+                text = PASTE.get_nowait()
+                if clipboard(text):
+                    paste()
+                    ding()
         except queue.Empty:
             pass
         with CAPTURE.lock:
