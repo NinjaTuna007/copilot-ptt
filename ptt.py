@@ -11,6 +11,7 @@ import json
 import os
 import queue
 import select
+import shutil
 import signal
 import subprocess
 import sys
@@ -274,7 +275,19 @@ def ding(cfg: dict) -> None:
     )
 
 
+def hush() -> None:
+    if shutil.which("spd-say") is None:
+        return
+    subprocess.Popen(
+        ["spd-say", "-C"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
 def start_recording() -> subprocess.Popen:
+    hush()
     STATE.mkdir(parents=True, exist_ok=True)
     if WAV.exists():
         WAV.unlink()
