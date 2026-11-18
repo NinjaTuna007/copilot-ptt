@@ -124,9 +124,13 @@ def pane_text(pane: str) -> str | None:
 
 def screen(path: Path) -> Path | None:
     """The whole screen, as the desktop's own tool takes it."""
-    if shutil.which("spectacle"):
+    from voice.desktop import wayland_session
+
+    if shutil.which("spectacle"):  # KDE, X11 or Wayland
         cmd = ["spectacle", "-b", "-n", "-f", "-o", str(path)]
-    elif shutil.which("import"):
+    elif wayland_session() and shutil.which("grim"):  # sway, Hyprland and other wlroots compositors
+        cmd = ["grim", str(path)]
+    elif shutil.which("import"):  # X11
         cmd = ["import", "-window", "root", str(path)]
     else:
         return None

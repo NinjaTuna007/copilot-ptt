@@ -63,6 +63,15 @@ with_gpu() {  # the CUDA libraries, only with an NVIDIA GPU
   if command -v nvidia-smi >/dev/null; then pip_install cuda; fi
 }
 
+wayland_tools() {  # Wayland needs the clipboard and key tools the session's own desktop does not provide
+  if [ "${XDG_SESSION_TYPE:-}" = wayland ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
+    command -v wl-copy >/dev/null && command -v wl-paste >/dev/null ||
+      say "Note: Wayland needs wl-clipboard for the clipboard: sudo apt install wl-clipboard"
+    command -v ydotool >/dev/null || command -v wtype >/dev/null ||
+      say "Note: Wayland needs ydotool for keys (or wtype on sway): sudo apt install ydotool, then ydotoold and the input group"
+  fi
+}
+
 # --- the pieces --------------------------------------------------------------
 
 install_ptt() {
@@ -70,6 +79,7 @@ install_ptt() {
   need_apt
   pip_install ptt
   with_gpu
+  wayland_tools
   id -nG | grep -qw input || say "Note: the hotkey needs the input group: sudo usermod -aG input $(id -un) (then log in again)"
   mkdir -p "$bin" "$units" "$HOME/.config/ptt"
   ln -sfn "$root/ptt/ptt.py" "$bin/ptt"

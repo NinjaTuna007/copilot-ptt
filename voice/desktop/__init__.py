@@ -1,9 +1,11 @@
 """What push-to-talk, talkback and hands-free need from the desktop, and nothing else.
 
-Every window, key, clipboard and terminal call goes through a Desktop. There
-are two: any X11 desktop (voice/desktop/generic_x11.py) and KDE on X11, which adds
-Klipper and Konsole (voice/desktop/kde_x11.py); current() picks one by kde_session().
-Another desktop, or Wayland, is one new module that fills in these methods.
+Every window, key, clipboard and terminal call goes through a Desktop. Under
+X11 there are two: any X11 desktop (voice/desktop/generic_x11.py) and KDE on X11,
+which adds Klipper and Konsole (voice/desktop/kde_x11.py). Under Wayland there are
+KDE (KWin's scripting interface), sway and Hyprland (their IPC tools), and a generic
+one that keeps the clipboard, keys, tmux, Konsole's tabs and Cursor's port working
+where the windows cannot be named (voice/desktop/wayland.py). current() picks one.
 """
 
 from __future__ import annotations
@@ -158,17 +160,24 @@ def kde_session() -> bool:
     return "KDE" in desktops or bool(os.environ.get("KDE_FULL_SESSION"))
 
 
+def wayland_session() -> bool:
+    """Wayland, named by the login session or by the compositor's own socket (a user service may have only that)."""
+    return os.environ.get("XDG_SESSION_TYPE") == "wayland" or bool(os.environ.get("WAYLAND_DISPLAY"))
+
+
 @cache
 def current() -> Desktop:
-    """KDE when it is running (Klipper, Konsole), any other X11 desktop otherwise."""
-    if os.environ.get("XDG_SESSION_TYPE") == "wayland":
-        raise NotImplementedError("Wayland is not supported yet: log in to the X11 session (see the README)")
+    """The compositor's own desktop: KDE or any other X11 desktop, or Wayland's KDE, sway or Hyprland."""
     from voice.desktop.tmux import WithTmux
 
-    if kde_session():
+    if wayland_session():
+        from voice.desktop.wayland import pick
+
+        found: Desktop = pick()
+    elif kde_session():
         from voice.desktop.kde_x11 import KdeX11
 
-        found: Desktop = KdeX11()
+        found = KdeX11()
     else:
         from voice.desktop.generic_x11 import GenericX11
 

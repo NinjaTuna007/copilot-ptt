@@ -22,7 +22,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))  # voice/state.py: standard library only
-from voice.desktop import kde_session  # noqa: E402
+from voice.desktop import kde_session, wayland_session  # noqa: E402
 from voice.state import CALL_TLS  # noqa: E402
 from voice.state import EC_CONF as CANCELLER_CONF, EC_SOURCE, KOKORO_MODELS as KOKORO, VENV, WAKE_MODEL  # noqa: E402
 NEMOTRON = WAKE_MODEL.parent / "nemotron"  # voice/speech/nemotron.py
@@ -88,19 +88,54 @@ def check(piece: str, what: str, ok: bool, detail: str = "", fix: str = "", warn
 def common() -> list[Check]:
     session = os.environ.get("XDG_SESSION_TYPE", "")
     kde = kde_session()
-    rc, klipper = run("qdbus", "org.kde.klipper", "/klipper", "getClipboardContents") if kde else (1, "")
-    return [
-        check("all", "X11 session", session in ("x11", ""), session or "unknown",
-              "log in to the Plasma (X11) session; Wayland is not supported yet"),
+    checks = [
         check("all", "private venv", (VENV / "bin/pip").exists(), str(VENV), "./install.sh ptt (or any piece)"),
         check("all", "PyQt5 and evdev from apt, seen by the venv",
               (VENV / "system/PyQt5").exists() and (VENV / "system/evdev").exists(), "",
               "sudo apt install python3-pyqt5 python3-evdev && ./install.sh ptt"),
-        check("all", "Klipper clipboard (KDE)", rc == 0, "" if rc == 0 else klipper[:80],
-              "start Klipper (KDE clipboard), or enable it in the system tray") if kde else
-        check("all", "xclip and xprop (a desktop without KDE)", bool(shutil.which("xclip") and shutil.which("xprop")),
-              "", "install xclip and xprop (Debian/Ubuntu: x11-utils; Fedora: xprop) with your package manager"),
     ]
+    if wayland_session():
+        desktops = os.environ.get("XDG_CURRENT_DESKTOP", "").upper().split(":")
+        sway = bool(os.environ.get("SWAYSOCK")) or bool({"SWAY", "I3"} & set(desktops))
+        hypr = bool(os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")) or "HYPRLAND" in desktops
+        ydotool, wtype = bool(shutil.which("ydotool")), bool(shutil.which("wtype"))
+        checks += [
+            check("all", "Wayland session", True, session or os.environ.get("WAYLAND_DISPLAY", "wayland")),
+            check("all", "wl-clipboard (the clipboard)",
+                  bool(shutil.which("wl-copy") and shutil.which("wl-paste")), "",
+                  "sudo apt install wl-clipboard"),
+            check("all", "ydotool (keys in the focused window)", ydotool,
+                  "" if ydotool else ("wtype instead: wlroots compositors only" if wtype else "no keys"),
+                  "sudo apt install ydotool, start ydotoold, and join the input group (or install wtype on sway)"),
+        ]
+        if kde:
+            have_qdbus = bool(shutil.which("qdbus6") or shutil.which("qdbus"))
+            checks.append(check("all", "KWin scripting (the focused window, KDE)",
+                                have_qdbus and bool(shutil.which("journalctl")),
+                                "", "install qdbus (part of Plasma) and systemd's journalctl"))
+        elif sway:
+            checks.append(check("all", "swaymsg (the focused window, sway)", bool(shutil.which("swaymsg")), "",
+                                "install sway"))
+        elif hypr:
+            checks.append(check("all", "hyprctl (the focused window, Hyprland)", bool(shutil.which("hyprctl")), "",
+                                "install Hyprland"))
+        else:
+            checks.append(check("all", "a compositor that names its windows",
+                                False, f"none of KDE, sway or Hyprland ({os.environ.get('XDG_CURRENT_DESKTOP', '?')})",
+                                "the clipboard and keys work; the focused window and Cursor's window need "
+                                "KDE Plasma, sway or Hyprland", warn_only=True))
+    else:
+        rc, klipper = run("qdbus", "org.kde.klipper", "/klipper", "getClipboardContents") if kde else (1, "")
+        checks += [
+            check("all", "X11 session", session in ("x11", ""), session or "unknown",
+                  "log in to an X11 session, or install the Wayland tools (see the README)"),
+            check("all", "Klipper clipboard (KDE)", rc == 0, "" if rc == 0 else klipper[:80],
+                  "start Klipper (KDE clipboard), or enable it in the system tray") if kde else
+            check("all", "xclip and xprop (a desktop without KDE)",
+                  bool(shutil.which("xclip") and shutil.which("xprop")), "",
+                  "install xclip and xprop (Debian/Ubuntu: x11-utils; Fedora: xprop) with your package manager"),
+        ]
+    return checks
 
 
 def ptt() -> list[Check]:

@@ -49,6 +49,9 @@ def paste() -> None:
     screen = desktop()
     window = screen.focused()
     set_target(agent_window(window))
+    if not window.id:
+        log("no focused window known: clipboard only, no keys")
+        return
     if screen.locked():
         log("screen locked: clipboard only, no keys")
         return

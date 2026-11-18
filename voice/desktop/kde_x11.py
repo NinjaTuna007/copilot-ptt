@@ -11,7 +11,8 @@ from pathlib import Path
 
 from voice.agents import CLAUDE_DAEMON, SHELLS, ancestors, cmdline_has, comm, nearest_agent, process
 from voice.desktop import Tab, Window
-from voice.desktop.generic_x11 import AnyTerminal, GenericX11
+from voice.desktop.generic import AnyTerminal
+from voice.desktop.generic_x11 import GenericX11
 
 KLIPPER = ("org.kde.klipper", "/klipper")
 TYPE_PAUSE = 0.15  # seconds between the text and its Enter, so Konsole takes them in order

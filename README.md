@@ -56,21 +56,22 @@ its modules in `core/`, its tools in `tools/`, and what gets installed into the 
 | [`call/`](call/) | **Phone call and Henchline:** the call server and page; `hooks/` the Claude Code terminal mirror; `system/` the unit; [`android/`](call/android/) the app. | `handsfree/`, Tailscale |
 | [`agents/`](agents/) | What the agents are told: one snippet for Claude Code, Cursor, Codex and anything reading `AGENTS.md`. | `talkback/` |
 | [`cursor-bridge/`](cursor-bridge/) | A small Cursor extension: each Cursor IDE chat becomes its own chat on the phone, and replies, voice messages and model switches reach that very chat. `./install.sh agents` installs it. | Cursor |
-| [`voice/`](voice/) | What all of them share: the state files (`state.py`), agents and their tabs (`agents.py`), talkback's queue (`spool.py`), files to and from the phone (`files.py`); `desktop/` windows, keys, the clipboard and terminals (KDE or any X11); `speech/` Whisper, Nemotron streaming and tone marks. | nothing |
+| [`voice/`](voice/) | What all of them share: the state files (`state.py`), agents and their tabs (`agents.py`), talkback's queue (`spool.py`), files to and from the phone (`files.py`); `desktop/` windows, keys, the clipboard and terminals (KDE or any X11 desktop; Wayland: KDE, sway, Hyprland); `speech/` Whisper, Nemotron streaming and tone marks. | nothing |
 | [`tests/`](tests/) | Unit tests per piece, and a throwaway-container test of the generic X11 desktop. | |
 | [`docs/`](docs/) | The README's pictures and the scripts that draw them. | |
 
 ## Desktops
 
-KDE Plasma on X11, or any other X11 desktop; everything the tools need from the desktop goes through one small interface, so Wayland is a module away (pull requests welcome). More: [voice/README.md](voice/README.md).
+KDE Plasma (X11 or Wayland), sway and Hyprland on Wayland, or any other X11 desktop; everything the tools need from the desktop goes through one small interface, so another compositor is a module away (pull requests welcome). On Wayland the clipboard comes from [`wl-clipboard`](https://github.com/bugaevc/wl-clipboard) and keys from [`ydotool`](https://github.com/ReimuNotMoe/ydotool) (or `wtype` on sway), which the installer checks for; KDE's windows and focus come from KWin's own scripting interface, sway's and Hyprland's from `swaymsg` and `hyprctl`. More: [voice/README.md](voice/README.md).
 
 ## Requirements
 
-- Linux, X11
+- Linux, X11 or Wayland
 - PipeWire (`pw-record`, `pw-play`)
-- KDE Klipper (`qdbus org.kde.klipper`)
+- KDE Klipper (`qdbus org.kde.klipper`) on X11
 - Python 3.12 (the system one; the venv borrows only PyQt5 and evdev from apt)
 - Your user in the `input` group
+- On Wayland: `wl-clipboard`, and `ydotool` (started as `ydotoold`) or `wtype`; `grim` for `handsfree show --screen` on sway/Hyprland (KDE uses Spectacle)
 
 While the laptop is plugged in, Whisper small stays on the GPU. On battery it runs on the CPU, so a CUDA context is not held and the GPU can sleep. The microphone is not opened until the key is down.
 
