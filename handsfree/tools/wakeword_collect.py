@@ -106,6 +106,10 @@ def main() -> int:
             subprocess.run(["pw-play", CHIME])
             audio = record(20)
             save(folder, "negative", audio)
+            if model is None:  # no published model for this word: the take is kept, nothing to score
+                print("confusers: saved", flush=True)
+                say("Thank you, that's all.")
+                return 0
             count, best = wakes(model, audio)
             print(f"confusers: published model woke {count}x, best {best:.2f}", flush=True)
             say("Thank you, that's all.")

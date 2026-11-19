@@ -152,15 +152,34 @@ def available() -> list[str]:
 # user's catch, 2026-11-16)
 INHERITED = re.compile(r"^(CURSOR_(?!API_KEY$)|__CURSOR|AGENT_TRANSCRIPTS$|CLAUDECODE$|CLAUDE_CODE_ENTRYPOINT$|"
                        r"CLAUDE_CODE_SESSION_ID$|CODEX_THREAD_ID$|CODEX_SANDBOX|TALKBACK_AGENT$)")
+# A tmux server started from an agent's own shell can keep that shell's "no color" settings and give them to
+# every pane. The Cursor CLI then draws no cursor block, after it has hidden the terminal's own cursor.
+# NO_COLOR turns color off whenever it is set. FORCE_COLOR turns it off only for 0 and false; 1, 2, 3, true,
+# and an empty value turn color on, and those are left as the server set them.
+_FORCE_COLOR_OFF = {"0", "false"}
+
+
+def _color_off(line: str) -> str:
+    """The color variable to drop from a `show-environment -g` line, or "" when the line keeps its color."""
+    name, sep, value = line.partition("=")
+    if name.startswith("-") or not sep:
+        return ""
+    if name == "NO_COLOR":
+        return name
+    if name == "FORCE_COLOR" and value.lower() in _FORCE_COLOR_OFF:
+        return name
+    return ""
 
 
 def clean_env() -> list[str]:
     """`env -u NAME …` for each agent's mark in tmux's own environment or ours: the new agent starts as itself."""
     names = {name for name in os.environ if INHERITED.match(name)}
     for line in out("show-environment", "-g").splitlines():
-        name = line.split("=", 1)[0].lstrip("-")
-        if INHERITED.match(name):
-            names.add(name)
+        bare = line.split("=", 1)[0].lstrip("-")
+        if INHERITED.match(bare):
+            names.add(bare)
+        if off := _color_off(line):
+            names.add(off)
     env = shutil.which("env")
     return [env, *(f"-u{name}" for name in sorted(names))] if env and names else []
 

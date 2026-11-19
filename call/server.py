@@ -822,10 +822,13 @@ async def voices_preview(request: web.Request) -> web.Response:
     return web.json_response({"url": files.link(meta), "name": meta["name"], "size": meta["size"]})
 
 
-def _push_picture(meta: dict, target: Speaker) -> None:
-    """Off a call, the picture is a notification the phone opens in this chat. On a call the status loop sends it."""
-    if in_call() or not CALL_RING.exists() or not CALL_ORIGIN.exists():
-        return
+def _push_picture(meta: dict, target: Speaker) -> str:
+    """Off a call, the picture is a notification the phone opens in this chat. "" when that push landed, or a call
+    will show it. A note when the phone did not get it: the route must not say the picture was sent."""
+    if in_call():
+        return ""
+    if not CALL_RING.exists() or not CALL_ORIGIN.exists():
+        return "The picture is saved. The phone hasn't connected, so it wasn't sent."
     origin = CALL_ORIGIN.read_text().strip()
     body = json.dumps({"agent": target.agent, "session": target.session, "why": meta["text"],
                        "file": {"url": origin + files.link(meta), "name": meta["name"], "type": meta["type"],
@@ -835,7 +838,8 @@ def _push_picture(meta: dict, target: Speaker) -> None:
                                                       headers={"Content-Type": "application/json"}), timeout=10).close()
         files.delivered(meta)
     except (OSError, ValueError):
-        pass
+        return "The picture is saved, but it didn't reach the phone."
+    return ""
 
 
 async def show_windows(request: web.Request) -> web.Response:
@@ -882,7 +886,9 @@ async def show_send(request: web.Request) -> web.Response:
         return web.json_response({"note": why})
     words = str(body.get("words", "")).strip() or "Here."
     meta = await loop.run_in_executor(None, files.post, path, words, target.agent, target.session)
-    await loop.run_in_executor(None, _push_picture, meta, target)
+    note = await loop.run_in_executor(None, _push_picture, meta, target)
+    if note:
+        return web.json_response({"note": note, "name": meta["name"]})
     return web.json_response({"ok": True, "name": meta["name"]})
 
 
@@ -1534,7 +1540,10 @@ def switch_cursor_plain(target: Speaker, model_id: str) -> str:
         if cursor_cli.on_model(chat, model_id):
             return ""
         time.sleep(0.4)
-    return "Cursor didn't switch. If a model list is open in that terminal, press Escape."
+    terminals.interrupt(target.tab)  # Escape: the list this command opened must not stay up
+    if target.tab.owner == tmux.OWNER:
+        cursor_cli.clear_picker(target.tab.address)
+    return "Cursor didn't switch."
 
 
 def switch_claude(target: Speaker, model: str, settings: dict) -> str:

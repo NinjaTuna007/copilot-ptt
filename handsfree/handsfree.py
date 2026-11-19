@@ -335,7 +335,7 @@ def text(words: str, until_read: float = 0, until: str = "read", as_session: str
         log(HANDSFREE_LOG, f"{agent} texted the phone")
         print(f"sent to the phone (id {tid})")
         sent = True
-        subprocess.Popen(  # not a thread: this command must return now, and the backup still runs after 8 s
+        subprocess.Popen(  # not a thread: this command must return now, and the backup still runs after 20 s
             [sys.executable, str(Path(__file__).resolve()), "text-backup", tid],
             start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if sent:
@@ -371,7 +371,7 @@ def _backup_text(tid: str) -> None:
     """The app push can be accepted and still never shown (the phone asleep, or its address stale). If the phone
     hasn't confirmed the text, say it as a normal notification too. Run as its own process: the text command
     itself must return at once."""
-    time.sleep(8)
+    time.sleep(20)  # the app fetches unconfirmed texts every 15 s; sooner, a text about to be confirmed is also pushed
     record = read_json(TEXTS / f"{tid}.json")
     if record.get("status") != "sent":
         return
@@ -629,7 +629,7 @@ def main() -> int:
                 args = args[:at] + args[at + 2:]
                 until = flag.removeprefix("--until-")
         return text(" ".join(args), minutes, until, as_session)
-    if command == "text-backup" and args:  # internal: the 8 s backup, detached so `handsfree text` returns now
+    if command == "text-backup" and args:  # internal: the backup, detached so `handsfree text` returns now
         _backup_text(args[0])
         return 0
     if command == "text-status":

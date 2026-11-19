@@ -151,7 +151,15 @@ class Saved(unittest.TestCase):
         with sqlite3.connect(store) as db:
             db.execute("update meta set value = ? where key = '0'", (json.dumps({"lastUsedModel": "default"}),))
         self.assertTrue(cursor_cli.on_model(self.CHAT, "default"))
+        self.assertEqual(cursor_cli.saved(self.CHAT)["model"], "default")
         self.assertFalse(cursor_cli.on_model(self.CHAT, "grok-4.7"))
+
+    def test_auto_in_the_store_is_the_menus_default(self):
+        store = next((Path.home() / ".cursor/chats").glob(f"*/{self.CHAT}/store.db"))
+        with sqlite3.connect(store) as db:
+            db.execute("update meta set value = ? where key = '0'", (json.dumps({"lastUsedModel": "auto"}),))
+        self.assertEqual(cursor_cli.saved(self.CHAT)["model"], "default")
+        self.assertTrue(cursor_cli.on_model(self.CHAT, "default"))
 
 
 if __name__ == "__main__":

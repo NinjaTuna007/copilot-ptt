@@ -112,7 +112,8 @@ def saved(chat: str) -> dict:
     """What this CLI chat is on, from its own records: {"model", "params"}. The store keeps the model id.
     Context, effort and fast are the CLI config's selected model when that is this one, else the parameters
     it last saved for that model. A Konsole tab has no screen to read, and this does not need one."""
-    model = str(_store_meta(chat).get("lastUsedModel") or "")
+    raw = str(_store_meta(chat).get("lastUsedModel") or "")
+    model = ALIASES.get(raw, raw)  # the store says "auto"; the menu's id for it is "default"
     if not model:
         return {"model": "", "params": {}}
     try:
@@ -120,10 +121,11 @@ def saved(chat: str) -> dict:
     except (OSError, ValueError, UnicodeError):
         return {"model": model, "params": {}}
     selected = cfg.get("selectedModel") if isinstance(cfg.get("selectedModel"), dict) else {}
-    params = _pairs(selected.get("parameters")) if selected.get("modelId") == model else {}
+    selected_id = ALIASES.get(str(selected.get("modelId") or ""), str(selected.get("modelId") or ""))
+    params = _pairs(selected.get("parameters")) if selected_id == model else {}
     if not params:
         table = cfg.get("modelParameters") if isinstance(cfg.get("modelParameters"), dict) else {}
-        params = _pairs(table.get(model))
+        params = _pairs(table.get(raw) or table.get(model))
     return {"model": model, "params": params}
 
 

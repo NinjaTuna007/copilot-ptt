@@ -87,6 +87,7 @@ class PlanPress(unittest.TestCase):
         self.assertEqual(commands.shift_tab_result("plan", "bypass"), "stop")
         self.assertEqual(commands.shift_tab_result("plan", "plan"), "stop")
         self.assertEqual(commands.shift_tab_result("plan", ""), "stop")
+        self.assertEqual(commands.shift_tab_result("", "plan"), "stop")
         self.assertEqual(commands.shift_tab_result("plan", "accept"), "agent")
 
     def test_plan_is_remembered_only_when_the_footer_says_so(self):

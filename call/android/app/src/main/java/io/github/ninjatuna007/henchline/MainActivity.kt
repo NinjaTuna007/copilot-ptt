@@ -2252,7 +2252,7 @@ class MainActivity : Activity() {
      *  is "gpt-5.6-sol" (the chip pushed the call button off the bar, 2026-11-16). */
     private fun shortModel(name: String): String {
         val words = name.split(" ").filter { it.isNotEmpty() && it != "·" }  // the laptop's own " · " parts: not words
-            .takeWhile { !Regex("(?i)\\d+[KM]|low|medium|high|xhigh|extra|max|fast|thinking|\\(.*").matches(it) }
+            .takeWhile { !Regex("(?i)\\d+[KM]|low|medium|high|xhigh|extra|thinking|\\(.*").matches(it) }
         val short = words.dropWhile { it.equals("Claude", ignoreCase = true) && words.size > 1 }.joinToString(" ").ifEmpty { name }
         // The effort, short, when the name has one: "Grok 4.7 Extra High" is "Grok 4.7 · xhigh" (showing only the
         // family hid that a chat ran on extra high, 2026-11-16)

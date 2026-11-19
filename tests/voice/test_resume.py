@@ -28,6 +28,15 @@ class Identity(unittest.TestCase):
         pane = b"TMUX_PANE=%12\0CURSOR_CONVERSATION_ID=" + chat.encode()
         self.assertEqual(resume.tab_of(pane), Tab("tmux", "%12"))
 
+    def test_a_resume_on_the_command_line_is_that_chat(self):
+        chat = "2ed6eebc-f2ce-43e5-8730-fc126b9f6794"
+        command = b"\0".join([b"cursor-agent", b"--force", b"--resume", chat.encode()])
+        self.assertTrue(resume.resumed(command, chat))
+        self.assertTrue(resume.resumed(b"cursor-agent\0--resume=" + chat.encode(), chat))
+        self.assertFalse(resume.resumed(command, "521b6ab2-0692-4903-aef2-de675cd6e972"))
+        self.assertFalse(resume.resumed(b"cursor-agent\0--resume\0", chat))
+        self.assertFalse(resume.resumed(b"--resume=" + chat.encode() + b"-extra", chat))
+
 
 if __name__ == "__main__":
     unittest.main()

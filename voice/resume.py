@@ -84,6 +84,16 @@ def tab_of(environ: bytes):
     return Tab()
 
 
+def resumed(cmdline: bytes, chat: str) -> bool:
+    """The process was started as this chat: `--resume <id>` or `--resume=<id>` on its command line. The
+    environment and the open files are sometimes unreadable, and the id is still there."""
+    parts = cmdline.split(b"\0")
+    want = chat.encode()
+    flag = b"--resume=" + want
+    return any(part == flag or (part == b"--resume" and i + 1 < len(parts) and parts[i + 1] == want)
+               for i, part in enumerate(parts))
+
+
 def holds_store(pid: int, chat: str) -> bool:
     """The Cursor CLI keeps its chat's store open. The id is in that path when the environment doesn't say it."""
     try:
@@ -112,11 +122,32 @@ def find_running(agent: str, chat: str) -> list:
         try:
             raw = (entry / "environ").read_bytes()
         except OSError:
-            continue
-        if not carries(agent, chat, raw) and not (agent == "cursor" and holds_store(pid, chat)):
+            raw = b""  # hidden environment: the command line can still name the chat
+        named = bool(raw) and carries(agent, chat, raw)
+        if not named and agent == "cursor":
+            try:
+                command = (entry / "cmdline").read_bytes()
+            except OSError:
+                command = b""
+            named = holds_store(pid, chat) or resumed(command, chat)
+        if not named:
             continue
         running = process(pid)
         if not running or running.agent != agent or running.is_editor:
             continue
-        hits.append((pid, tab_of(raw)))
+        tab = tab_of(raw)
+        if not tab:
+            tab = _tmux_pane(pid)
+        hits.append((pid, tab))
     return hits
+
+
+def _tmux_pane(pid: int):
+    """The tmux pane whose process is `pid`, when the process won't say its pane. Empty when it isn't in tmux."""
+    from voice.desktop import Tab
+    from voice.desktop.tmux import out
+    for line in out("list-panes", "-a", "-F", "#{pane_id} #{pane_pid}").splitlines():
+        pane, _, got = line.partition(" ")
+        if got == str(pid) and pane.startswith("%"):
+            return Tab("tmux", pane)
+    return Tab()

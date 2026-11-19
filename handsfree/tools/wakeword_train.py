@@ -91,13 +91,21 @@ def hey_word_spans(model, path: str, word: str) -> list[tuple[int, int]]:
     segments, _ = model.transcribe(path, language="en", beam_size=1, word_timestamps=True)
     words = [w for s in segments for w in s.words]
     spans = []
-    for i, heard in enumerate(words):
+    i = 0
+    while i < len(words):
+        heard = words[i]
         nxt = words[i + 1] if i + 1 < len(words) else None
         pair = re.sub(r"\W", "", heard.word + (nxt.word if nxt else ""))
         if is_word(heard.word, word):
             spans.append((int(heard.start * RATE), int(heard.end * RATE)))
-        elif nxt and is_word(pair, word):
+            i += 1
+        elif nxt and not is_word(nxt.word, word) and is_word(pair, word):
+            # "hench" "line" is one span. "hey" "jarvis" is not: jarvis alone is the word, and the pair
+            # "heyjarvis" is close enough (0.80) that counting both would make one take look like two.
             spans.append((int(heard.start * RATE), int(nxt.end * RATE)))
+            i += 2
+        else:
+            i += 1
     return spans
 
 

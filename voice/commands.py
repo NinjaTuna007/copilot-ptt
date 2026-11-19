@@ -166,9 +166,10 @@ def settings_skip_permissions(paths: list[Path]) -> bool:
 
 
 def shift_tab_result(before: str, after: str) -> str:
-    """After one Shift+Tab: "agent" when the footer left the previous mode for another safe one, "stop" when it
-    says bypass or never moved. Stop means the chip must not press Shift+Tab again."""
-    if after == "bypass" or not after or after == before:
+    """After one Shift+Tab: "agent" when the footer left a known mode for another safe one, "stop" when it says
+    bypass, never moved, or the mode before the press was blank. A blank then "plan" is not leaving plan. Stop
+    means the chip must not press Shift+Tab again."""
+    if not before or after == "bypass" or not after or after == before:
         return "stop"
     return "agent"
 
