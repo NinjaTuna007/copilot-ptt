@@ -8,6 +8,9 @@ chat for an agent that lives there.
 
 from __future__ import annotations
 
+import fcntl
+import json
+import os
 import re
 import subprocess
 import sys
@@ -18,9 +21,9 @@ from pathlib import Path
 
 from voice import snaps
 from voice.agents import SPOKEN_TO, identity, process, started
-from voice.desktop import current as desktop, cursor_bridge, cursor_cdp
-from voice.state import (AWAY, BY_HANDSFREE, CALL_CUT_IN, CALL_INTERRUPT, CALL_PINNED, CALL_TOLD, HANDSFREE_LOG, INTRODUCED, LAST, LISTEN, SPEAKERS, Sent,
-                         Speaker, in_call, last_speaker, log, recent_speakers)
+from voice.desktop import Tab, current as desktop, cursor_bridge, cursor_cdp
+from voice.state import (AWAY, BY_HANDSFREE, CALL_CUT_IN, CALL_INTERRUPT, CALL_PINNED, CALL_TOLD, CHAT_KEY, HANDSFREE_LOG, INTRODUCED, LAST, LISTEN, SPEAKERS, STATE, Sent,
+                         Speaker, in_call, last_speaker, log, recent_speakers, renamed)
 
 SAY = Path(__file__).resolve().parents[2] / "talkback/scripts/say.py"
 AFTER_SWITCH = 30.0  # seconds to start talking after "Now talking to …"
@@ -190,9 +193,32 @@ def discover_all() -> int:
             found.save(SPEAKERS / f"{found.session}.json")
             known.append(found)
             new += 1
-    if new:
-        log(HANDSFREE_LOG, f"found {new} agent(s) running, not yet heard: registered")
+    folded = fold_placeholders(known)
+    if new or folded:
+        log(HANDSFREE_LOG, f"found {new} agent(s) running, not yet heard: registered"
+            + (f"; {folded} folder placeholder(s) folded into the real chat" if folded else ""))
     return new
+
+
+def fold_placeholders(known: list | None = None) -> int:
+    """A folder placeholder and the real chat in the same tab are one agent. The placeholder goes, and the phone
+    follows the real chat. Discover often cannot read the session id (the process hides its environment), so it
+    records the folder, and the real id is saved later without removing that record."""
+    if known is None:
+        known = [s for s in (Speaker.load(p) for p in SPEAKERS.glob("*.json")) if s]
+    folded = 0
+    for real in known:
+        if not real.tab or not CHAT_KEY.search(real.session):
+            continue
+        for other in list(known):
+            if other.agent != real.agent or other.session == real.session or not other.tab:
+                continue
+            if other.tab == real.tab and other.where == real.where and not CHAT_KEY.search(other.session):
+                (SPEAKERS / f"{other.session}.json").unlink(missing_ok=True)
+                renamed(other.session, real.session)
+                known.remove(other)
+                folded += 1
+    return folded
 
 
 def switch_to(speaker: Speaker) -> None:
@@ -269,6 +295,186 @@ def route(text: str, last_message: tuple[str, Heard] | None) -> bool:
 
 
 _tabs: tuple[float, list] = (0.0, [])  # every agent tab with its program's pid, asked again after a moment
+
+
+def open_editor(speaker: Speaker) -> bool:
+    """A Cursor editor chat whose window isn't open: open that project, then the chat. False when it still isn't."""
+    if not speaker.in_editor or cursor_window(speaker.where):
+        return bool(speaker.in_editor and cursor_window(speaker.where))
+    chat = cursor_bridge.chat_of(speaker.session)
+    found = next((c for c in cursor_bridge.all_chats() if c["chat"] == chat), None) if chat else None
+    if not found:
+        return False
+    log(HANDSFREE_LOG, f"opening Cursor for {speaker.where} so {chat[:8]} can be reached")
+    return cursor_bridge.open_anywhere(chat, found["folder"]) and bool(cursor_window(speaker.where))
+
+
+_RESUMING = STATE / "resuming"  # one file per chat id, shared by the call server and hands-free
+
+
+def _load(handle) -> dict:
+    handle.seek(0)
+    try:
+        data = json.loads(handle.read() or "{}")
+    except ValueError:
+        data = {}
+    return data if isinstance(data, dict) else {}
+
+
+def _pane_open(tab: Tab) -> bool | None:
+    """True when the pane exists, False when it is gone, None when tmux could not be asked. None stays blocked."""
+    from voice.desktop import tmux
+    if not tab or tab.owner != tmux.OWNER:
+        return False
+    return tmux.pane_there(tab)
+
+
+def _reserved_tab(chat: str) -> Tab | None:
+    """The pane a resume already recorded, if it named one."""
+    path = _RESUMING / chat
+    try:
+        data = json.loads(path.read_text() or "{}")
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    owner, address = str(data.get("owner") or ""), str(data.get("address") or "")
+    return Tab(owner, address) if owner and address else None
+
+
+def _claim(chat: str) -> tuple[str, str]:
+    """Take the shared resume, or ("still starting", ""). The token is this attempt. A live holder blocks, including
+    this process, until that attempt records the pane as up or clears its own token. A pane that still exists blocks
+    too, even while the agent is not yet the foreground."""
+    path = _RESUMING / chat
+    _RESUMING.mkdir(parents=True, exist_ok=True)
+    path.touch()
+    with path.open("r+") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        data = _load(handle)
+        owner, address = str(data.get("owner") or ""), str(data.get("address") or "")
+        tab = Tab(owner, address) if owner and address else Tab()
+        try:
+            holder = int(data.get("pid") or 0)
+        except (TypeError, ValueError):
+            holder = 0
+        holder_alive = bool(holder) and Path(f"/proc/{holder}").exists()
+        waiting = data.get("phase") != "up"
+        pane = _pane_open(tab) if tab else False
+        if pane is not False or (waiting and holder_alive):
+            return "That chat is still starting.", ""
+        token = f"{os.getpid()}-{time.time_ns()}"
+        handle.seek(0)
+        handle.truncate()
+        json.dump({"pid": os.getpid(), "token": token, "phase": "wait", "owner": "", "address": ""}, handle)
+        handle.flush()
+    return "", token
+
+
+def _write_reservation(chat: str, tab: Tab, token: str, phase: str = "wait") -> None:
+    path = _RESUMING / chat
+    if not path.exists():
+        return
+    with path.open("r+") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        data = _load(handle)
+        if data.get("token") != token:
+            return
+        handle.seek(0)
+        handle.truncate()
+        json.dump({"pid": os.getpid(), "token": token, "phase": phase,
+                   "owner": tab.owner, "address": tab.address}, handle)
+        handle.flush()
+
+
+def _clear_reservation(chat: str, token: str = "", *, force: bool = False) -> None:
+    """Drop the resume. A token only drops its own attempt: a later claim must not be erased by the earlier call.
+    force: the chat is running, so whatever attempt is recorded is done."""
+    path = _RESUMING / chat
+    if not path.exists():
+        return
+    with path.open("r+") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        if not force and _load(handle).get("token") != token:
+            return
+        handle.seek(0)
+        handle.truncate()
+        handle.flush()
+
+
+def place(speaker: Speaker) -> str:
+    """Point the speaker at the process that is its chat id. "" when that process is there (started in tmux if it
+    wasn't). A note when the id is known but can't be reached. A folder placeholder, which has no id, is left on
+    its saved tab."""
+    from voice import resume
+    from voice.agents import started
+    from voice.desktop import tmux
+    if (speaker.pid and speaker.tab and Path(f"/proc/{speaker.pid}").exists()
+            and started(speaker.pid) == speaker.born and desktop().terminals.agent_running(speaker.tab)):
+        return ""  # already the process we pinned for this id
+    chat = resume.chat_id(speaker.session)
+    if speaker.in_editor:
+        if cursor_window(speaker.where) or open_editor(speaker):
+            return ""
+        return "That Cursor chat isn't open, and its window didn't start."
+    if not chat:
+        return ""
+    found = resume.find_running(speaker.agent, chat)
+    if len(found) > 1:
+        return "That chat is open in more than one terminal, so I didn't start another."
+    if len(found) == 1:
+        pid, tab = found[0]
+        if not tab:
+            return "That chat is running, but not in a terminal I can type into."
+        speaker.tab, speaker.pid, speaker.born = tab, pid, started(pid)
+        speaker.save(SPEAKERS / f"{speaker.session}.json")
+        _clear_reservation(chat, force=True)  # the chat is running: a leftover resume must not block the next one
+        return ""
+    folder = resume.folder_of(speaker.agent, chat)
+    if folder is None:
+        return "That chat isn't running, and I don't know which folder to start it in."
+    note, token = _claim(chat)
+    if note:
+        held = _reserved_tab(chat)
+        if held and _pane_open(held) is True:
+            speaker.tab = held
+            if not speaker.pin():
+                speaker.pid, speaker.born = 0, 0
+            speaker.save(SPEAKERS / f"{speaker.session}.json")
+            return ""  # type into the pane already reserved, instead of starting another
+        return note
+    published = False
+    try:
+        tab = tmux.resume(speaker.agent, folder, chat)
+        if not tab:
+            return "That chat isn't running, and it didn't start in tmux."
+        _write_reservation(chat, tab, token)
+        published = True
+        previous = (speaker.tab, speaker.pid, speaker.born)
+        speaker.tab = tab  # pin() looks at this tab; put the old one back if the process never appears
+        pinned = False
+        until = time.monotonic() + 12
+        while time.monotonic() < until:
+            if speaker.pin():  # pin() is true only the time the process is first noted
+                pinned = True
+                break
+            time.sleep(0.3)
+        if not pinned:
+            speaker.tab, speaker.pid, speaker.born = previous
+            if _pane_open(tab) is False:
+                _clear_reservation(chat, token)
+            else:
+                _write_reservation(chat, tab, token, "up")  # still there, or tmux could not be asked
+            log(HANDSFREE_LOG, f"{speaker.agent} {chat[:8]} did not come up in tmux {tab.address}")
+            return "That chat didn't come up in tmux."
+        _write_reservation(chat, tab, token, "up")  # saved below: the other service adopts this pid instead of starting one
+        speaker.save(SPEAKERS / f"{speaker.session}.json")
+        log(HANDSFREE_LOG, f"started {speaker.agent} {chat[:8]} in tmux {tab.address}")
+        say(f"{speaker.spoken()} wasn't running. I started that chat.")
+        return ""
+    finally:
+        if token and not published:
+            _clear_reservation(chat, token)
 
 
 def reachable(speaker: Speaker) -> bool:
@@ -472,6 +678,11 @@ def deliver_words(text: str, heard: Heard, to: Speaker | None = None, urgent: bo
         log(HANDSFREE_LOG, "nobody to send to")
         refuse("I heard you, but no agent has spoken yet.")
         return False
+    missing = place(speaker)
+    if missing:
+        log(HANDSFREE_LOG, f"place {speaker.session[:24]}: {missing}")
+        refuse(missing)
+        return False
     tab = speaker.tab
     if speaker.in_editor:
         # That very chat brought to the front first, by Henchline's bridge in Cursor; without it, the window's
@@ -480,7 +691,8 @@ def deliver_words(text: str, heard: Heard, to: Speaker | None = None, urgent: bo
         if chat and cursor_cdp.available(speaker.where):
             # Through Cursor's debugging port: that chat's box by its id, a real Enter, no keys on the desktop and
             # no window raised, so it works with the screen locked. Never then typed with keys: no second copy.
-            why = "" if cursor_bridge.open_chat(speaker.where, chat) else "the bridge couldn't open that chat"
+            why = "" if cursor_bridge.open_chat(speaker.where, chat) else (
+                cursor_bridge.last_why or "the bridge couldn't open that chat")
             why = why or cursor_cdp.send(speaker.where, chat, message, urgent=urgent)
             log(HANDSFREE_LOG, f"sent to cursor chat {chat[:8]} in {speaker.where} (debugging port)" if not why
                 else f"Cursor chat {chat[:8]} in {speaker.where}: {why}; nothing typed with keys")

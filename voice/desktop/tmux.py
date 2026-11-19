@@ -13,6 +13,7 @@ import re
 import os
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -164,15 +165,12 @@ def clean_env() -> list[str]:
     return [env, *(f"-u{name}" for name in sorted(names))] if env and names else []
 
 
-def start(agent: str, folder: Path, model: str = "", params: dict | None = None) -> Tab:
-    """A new agent in its own tmux window in that folder; its tab, or an empty one when it couldn't start."""
-    command = COMMANDS.get(agent, [""])
-    program = shutil.which(command[0])
+def _window(folder: Path, name: str, argv: list[str]) -> Tab:
+    """A tmux window running `argv` in that folder. The pane, or empty when it couldn't start."""
+    program = shutil.which(argv[0]) if argv else ""
     if not program:
         return Tab()
-    chosen = model_args(agent, model, params or {}) if model else []  # checked by the caller
-    where = ["-c", str(folder), "-n", f"{agent}:{folder.name}", "-P", "-F", "#{pane_id}",
-             *clean_env(), program, *command[1:], *chosen]
+    where = ["-c", str(folder), "-n", name, "-P", "-F", "#{pane_id}", *clean_env(), program, *argv[1:]]
     running = tmux("has-session", "-t", SESSION)
     if running and running.returncode == 0:
         pane = out("new-window", "-d", "-t", f"{SESSION}:", *where)
@@ -182,11 +180,46 @@ def start(agent: str, folder: Path, model: str = "", params: dict | None = None)
     return Tab(OWNER, pane) if pane.startswith("%") else Tab()
 
 
+def start(agent: str, folder: Path, model: str = "", params: dict | None = None) -> Tab:
+    """A new agent in its own tmux window in that folder; its tab, or an empty one when it couldn't start."""
+    command = COMMANDS.get(agent, [""])
+    chosen = model_args(agent, model, params or {}) if model else []  # checked by the caller
+    return _window(folder, f"{agent}:{folder.name}", [*command, *chosen])
+
+
+def resume(agent: str, folder: Path, chat: str) -> Tab:
+    """That chat id, continued, in its own tmux window. Empty when this agent has no resume, or it didn't start."""
+    argv = {"claude": ["claude", "--permission-mode", "auto", "--resume", chat],
+            "cursor": ["cursor-agent", "--force", "--resume", chat],
+            "codex": ["codex", "resume", chat]}.get(agent)
+    return _window(folder, f"{agent}:{chat[:8]}", argv) if argv else Tab()
+
+
 def pane_pid(tab: Tab) -> int:
     """The pane's first process: with the pane id, says it is still the same pane (tmux reuses ids after a
-    restart)."""
-    pid = out("display-message", "-p", "-t", tab.address, "#{pane_pid}") if tab.owner == OWNER else ""
+    restart). 0 when it is gone, or when tmux could not be asked: callers that must not treat those the same
+    use pane_there."""
+    there = pane_there(tab)
+    if there is not True:
+        return 0
+    pid = out("display-message", "-p", "-t", tab.address, "#{pane_pid}")
     return int(pid) if pid.isdigit() else 0
+
+
+def pane_there(tab: Tab) -> bool | None:
+    """True when that tmux pane exists, False when tmux says it does not, None when tmux could not be asked.
+    None is not a dead pane: a failed query must not start a second resume."""
+    if not tab or tab.owner != OWNER:
+        return False
+    done = tmux("display-message", "-p", "-t", tab.address, "#{pane_id}")
+    if done is None:
+        return None
+    if done.returncode == 0 and done.stdout.strip() == tab.address:
+        return True
+    err = f"{done.stderr}\n{done.stdout}".lower()
+    if "can't find pane" in err or "no server running" in err or "error connecting" in err:
+        return False
+    return None
 
 
 def pane_pids() -> dict[str, int] | None:
@@ -248,6 +281,21 @@ def accept_trust(tab: Tab, folder: Path, agent: str = "claude", wait: float = 12
     return False
 
 
+def steer_after(press, taken=None, watch=None, limit: int = 8, pause: float = 0.45) -> None:
+    """More Enters after the line is in. On a side thread: the "I got it" chime plays when the first Enter
+    lands, and must not wait while these catch the line up."""
+    def run() -> None:
+        for _ in range(limit):
+            time.sleep(pause)
+            if taken is not None and taken():
+                return
+            if watch is not None and watch():
+                return
+            if not press():
+                return
+    threading.Thread(target=run, name="steer", daemon=True).start()
+
+
 def end(tab: Tab) -> bool:
     return tab.owner == OWNER and (done := tmux("kill-pane", "-t", tab.address)) is not None and done.returncode == 0
 
@@ -270,7 +318,7 @@ class WithTmux(Terminals):
 
     def type_line(self, tab: Tab, text: str, again: bool = False, taken=None) -> bool:
         if tab.owner != OWNER:
-            return self.inner.type_line(tab, text)
+            return self.inner.type_line(tab, text, again=again, taken=taken)
         # Through a paste buffer from stdin: the words are never tmux arguments, so a leading "-" or a trailing ";"
         # (tmux's command separator) can't be read as tmux's own, and a newline doesn't send early
         buffer = f"henchline-{os.getpid()}-{time.monotonic_ns()}"
@@ -283,27 +331,19 @@ class WithTmux(Terminals):
         entered = tmux("send-keys", "-t", tab.address, "Enter")
         if not (entered and entered.returncode == 0):
             return False
-        if not again:
-            return True
-        # The first Enter puts the words on the follow-up list, and one more Enter steers the first item in. Steered
-        # until the agent's own record shows these words taken in (taken(): the user found reading the screen
-        # hacky, 2026-11-17), one Enter a second, each one taking in the oldest waiting item
-        if taken is not None:
-            for _ in range(10):
-                time.sleep(1.0)
-                if taken():
-                    return True
-                if not (done := tmux("send-keys", "-t", tab.address, "Enter")) or done.returncode != 0:
-                    return False
-            return True
-        # Without that record (an agent not yet known by its chat id): until the list is gone from the screen
-        for _ in range(8):
-            time.sleep(0.45)
-            shown = out("capture-pane", "-p", "-t", tab.address).lower()
-            if "follow-ups" not in shown and "enter steer" not in shown:
-                return True
-            if not (done := tmux("send-keys", "-t", tab.address, "Enter")) or done.returncode != 0:
-                return False
+        if again:
+            def press() -> bool:
+                done = tmux("send-keys", "-t", tab.address, "Enter")
+                return bool(done and done.returncode == 0)
+
+            def clear() -> bool:
+                shown = out("capture-pane", "-p", "-t", tab.address).lower()
+                return "follow-ups" not in shown and "enter steer" not in shown
+
+            if taken is not None:
+                steer_after(press, taken=taken, limit=10, pause=1.0)
+            else:
+                steer_after(press, watch=clear)
         return True
 
     def only_a_shell(self, window: Window) -> bool:

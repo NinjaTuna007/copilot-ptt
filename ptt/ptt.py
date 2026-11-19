@@ -184,6 +184,10 @@ if __name__ == "__main__":
     if {"-h", "--help"} & set(sys.argv[1:]):  # not a second listener (it was, before 2026-11-16)
         print(__doc__)
         sys.exit(0)
+    # The desktop restores a tray app it saved at logout, on top of the service. That second copy is the
+    # extra headset. The service is the one that should be running.
+    if any(a == "-session" or a.startswith("-session=") for a in sys.argv[1:]):
+        sys.exit(0)
     try:
         desktop().prepare_threads()
         cfg = Config.load(PTT_LOG)

@@ -50,8 +50,10 @@ class AnyTerminal(Terminals):
         foreground = foreground_on(tab.address)
         return bool(foreground) and any(p.agent for p in [process(foreground)] if p)
 
-    def type_line(self, tab: Tab, text: str) -> bool:
-        """Into the terminal's window: paste (Ctrl+Shift+V, as most terminals take it), then Enter."""
+    def type_line(self, tab: Tab, text: str, again: bool = False, taken=None) -> bool:
+        """Into the terminal's window: paste (Ctrl+Shift+V, as most terminals take it), then Enter. A second
+        Enter (the Cursor CLI's steer) needs the window focused, so it is not sent from here."""
+        del again, taken
         return self.desktop.paste_into(tab.owner, text, ("ctrl", "shift", "v"), ("return",))
 
     def only_a_shell(self, window: Window) -> bool:

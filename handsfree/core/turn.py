@@ -28,6 +28,7 @@ from voice.state import (BY_HANDSFREE, CALL_HANGUP, CALL_PUSH, HANDSFREE_LOG, HA
 
 THINK_WINDOW = 180  # seconds after "give me a minute"
 WAIT_FOR_WORDS = 5.0  # after the wake word, seconds to start talking before it gives up
+CHIME_GRACE = 1.2  # the listening chime is loud in the mic; it must not count as them starting, then the pause close the turn
 END_DB, END_FRAMES = 6, 50  # 1.5 s at most END_DB over the floor ends the turn
 CALL_END_FRAMES = 30  # 0.9 s on a phone call: the user found 1.5 s slow there; a longer pause becomes a follow-on
 # Nemotron's words so far end a sentence ("…tests.", not "…and uh"): the turn ends after this much quiet instead
@@ -147,7 +148,11 @@ class Turn:
             db = level(frame)
             peak = max(peak, db)
             if not started:
-                started = db > floor + START_DB or time.monotonic() - since > WAIT_FOR_WORDS
+                waited = time.monotonic() - since
+                # The chime plays into the room as the turn opens. One loud moment of it used to start the
+                # pause clock, and 1.5 s of quiet then closed the turn before they had said anything (Jarvis, 1.7 s).
+                if heard is not Heard.WOKE or waited >= CHIME_GRACE:
+                    started = db > floor + START_DB or waited > WAIT_FOR_WORDS
                 continue
             quiet = quiet + 1 if db < max(floor + END_DB, peak - BELOW_PEAK) else 0
             if quiet == OVER_FRAMES and self.ends_with_over(frames):
@@ -286,11 +291,19 @@ class Turn:
 
 
 ON_THE_CALL = (Heard.CALL, Heard.PUSHED, Heard.OVER_YOU, Heard.FOLLOW_ON, Heard.REPLY)
+# Hands-free, including the wake word and "give me a minute": the words are the turn, and the Cursor CLI parks
+# them until it finishes. Push-to-talk does not come through here, so it still queues.
+HANDS_FREE = (Heard.WOKE, Heard.REPLY, Heard.THINK, Heard.FOLLOW_ON, Heard.OVER_YOU)
 
 
 def cut_in(heard: Heard, to: routing.Speaker | None) -> bool:
-    """A spoken turn on a call cuts in when the phone asked, or by default when it's Cursor. Talking over a clip
-    and a follow-on are the turns that arrive while the agent is busy: those are the ones that must cut in."""
-    if not in_call() or heard not in ON_THE_CALL:
+    """A spoken turn cuts into the Cursor CLI, on a call or over hands-free, or it sits in the follow-up queue.
+    On a call the phone can choose to let it wait. Off a call, hands-free to that CLI steers, wake word included.
+    Claude and Codex wait unless the call says to cut in."""
+    if not in_call():
+        if heard not in HANDS_FREE:
+            return False
+        return bool(to and to.agent == "cursor" and not to.in_editor)
+    if heard is Heard.WOKE or heard not in ON_THE_CALL:
         return False
     return routing.interrupt_waiting() or routing.cuts_in(to)

@@ -83,11 +83,16 @@ class Konsole(AnyTerminal):
         foreground = qdbus(tab.owner, tab.address, "foregroundProcessId")
         return foreground.isdigit() and any(p.agent for p in [process(int(foreground))] if p)
 
-    def type_line(self, tab: Tab, text: str) -> bool:
+    def type_line(self, tab: Tab, text: str, again: bool = False, taken=None) -> bool:
         for chunk in (text, "\r"):
             if not qdbus_ok(tab.owner, tab.address, "sendText", chunk):
                 return False
             time.sleep(TYPE_PAUSE)
+        if again:
+            from voice.desktop.tmux import steer_after
+            steer_after(lambda: qdbus_ok(tab.owner, tab.address, "sendText", "\r"),
+                        taken=taken, limit=10 if taken is not None else 1,
+                        pause=1.0 if taken is not None else 0.4)
         return True
 
     def interrupt(self, tab: Tab) -> bool:

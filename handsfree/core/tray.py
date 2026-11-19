@@ -24,10 +24,12 @@ TIPS = {
 
 def show(listener: Listener, stop: threading.Event) -> None:
     """Run the tray until `stop` is set (Qt wants the main thread)."""
-    from PyQt5.QtCore import QTimer
+    from PyQt5.QtCore import QCoreApplication, Qt, QTimer
     from PyQt5.QtGui import QColor, QIcon, QPainter
     from PyQt5.QtWidgets import QAction, QApplication, QMenu, QSystemTrayIcon
 
+    # systemd starts this. The desktop must not save it and start another after a reboot.
+    QCoreApplication.setAttribute(Qt.AA_DisableSessionManager, True)
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     headset = QIcon.fromTheme("audio-headset")  # not a mic: that is push-to-talk

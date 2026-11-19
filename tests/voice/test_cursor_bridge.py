@@ -20,5 +20,21 @@ class ProjectNames(unittest.TestCase):
         self.assertEqual(cursor_bridge.chat_of("cursor-_smarc2"), "")
 
 
+class DeadWindow(unittest.TestCase):
+    def test_a_dead_note_is_not_a_second_window(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        folder = Path(tempfile.mkdtemp())
+        (folder / "1.json").write_text('{"pid": 5, "folders": ["/home/shekharu/colcon_ws/src/smarc2"]}')
+        (folder / "2.json").write_text('{"pid": 9, "folders": ["/home/shekharu/colcon_ws/src/smarc2"]}')
+        (folder / "2.sock").write_bytes(b"")
+        with patch.object(cursor_bridge, "DIR", folder), patch.object(cursor_bridge, "pid_alive", lambda pid: pid == 5):
+            found = cursor_bridge.windows_of("home-shekharu-colcon-ws-src-smarc2")
+        self.assertEqual([note.name for note, _ in found], ["1.json"])
+        self.assertFalse((folder / "2.json").exists())
+        self.assertFalse((folder / "2.sock").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

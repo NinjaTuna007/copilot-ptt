@@ -202,10 +202,12 @@ class Panel:
 
 def run(cfg: Config, stop: threading.Event, capture: HotkeyCapture, phases: queue.Queue,
         texts: queue.Queue) -> None:
-    from PyQt5.QtCore import QTimer
+    from PyQt5.QtCore import QCoreApplication, Qt, QTimer
     from PyQt5.QtGui import QCursor
     from PyQt5.QtWidgets import QAction, QApplication, QMenu, QSystemTrayIcon
 
+    # systemd starts this. The desktop must not save it and start another after a reboot.
+    QCoreApplication.setAttribute(Qt.AA_DisableSessionManager, True)
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     box = [unit_states()]  # the services' states, swapped whole by the watcher (never seen half-filled)

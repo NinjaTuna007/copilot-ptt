@@ -405,6 +405,9 @@ def ntfy(topic: str, title: str, message: str, headers: dict[str, str]) -> bool:
 
 
 def run() -> int:
+    # A desktop-restored copy, on top of the service. It would be a second listener and a second headset.
+    if any(a == "-session" or a.startswith("-session=") for a in sys.argv[1:]):
+        return 0
     cfg = whisper.Config.load(HANDSFREE_LOG)
     canceller_since = start_canceller()
     transcriber = whisper.Transcriber(cfg, HANDSFREE_LOG)
@@ -468,8 +471,8 @@ def voice_note(transcriber: whisper.Transcriber, meta_path: Path) -> None:
         result = {"status": "failed", "note": "Nothing heard in it."}
     elif time.time() - meta.get("at", 0) > VOICE_NOTE_STALE + 25:  # transcribed after the phone gave up (180 s)
         result = {"status": "failed", "text": plain, "note": "Not sent: transcribed too late."}
-    elif not target or not routing.reachable(target):
-        result = {"status": "failed", "text": plain, "note": "That agent isn't reachable."}
+    elif not target or (why := routing.place(target)) or not routing.reachable(target):
+        result = {"status": "failed", "text": plain, "note": why if target and why else "That agent isn't reachable."}
     elif routing.deliver(rich or plain, routing.Heard.VOICE_NOTE, to=target):
         result = {"status": "done", "text": plain}
     else:

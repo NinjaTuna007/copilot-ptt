@@ -435,8 +435,11 @@ def to_agent(words: str, session: str, heard: Heard, switch: bool = True, urgent
     target = None
     if session:
         target = next((s for s in recent_speakers() if s.session == session), None)
-        if not target or not routing.reachable(target):
+        if target is None:
             return "", "That agent isn't reachable, so I didn't send that. Pick another and send again."
+        why = routing.place(target)  # the chat id: the live process, or that id started in tmux
+        if why or not routing.reachable(target):
+            return "", why or "That agent isn't reachable, so I didn't send that. Pick another and send again."
         current = last_speaker()
         if switch and (not current or current.session != session):
             routing.switch_to(target)

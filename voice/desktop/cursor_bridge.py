@@ -45,13 +45,24 @@ def owner_of(chat: str) -> str:
 last_why = ""  # what the bridge said when it said no ("not a chat id" from an older bridge, before a reload)
 
 
+def pid_alive(pid: object) -> bool:
+    """The bridge note's process is still that window. A killed Cursor leaves the note behind."""
+    return isinstance(pid, int) and pid > 0 and Path(f"/proc/{pid}").exists()
+
+
 def windows_of(project: str) -> list[tuple[Path, dict]]:
-    """The Cursor windows (their bridge note, and what it says) whose workspace folder is that project."""
+    """The Cursor windows (their bridge note, and what it says) whose workspace folder is that project.
+    A note whose process is gone is removed: after a reboot it otherwise looks like a second window, and a chat
+    then opens in neither."""
     found = []
     for note in DIR.glob("*.json"):
         try:
             window = json.loads(note.read_text())
         except (OSError, ValueError):
+            continue
+        if not pid_alive(window.get("pid")):
+            note.unlink(missing_ok=True)
+            note.with_suffix(".sock").unlink(missing_ok=True)
             continue
         if project in {project_of(f) for f in window.get("folders", []) if isinstance(f, str)}:
             found.append((note, window))
@@ -67,6 +78,7 @@ def ask_window(chat: str, request: dict) -> bool:
         return False
     owners = [note for note, _ in windows_of(project)]
     if len(owners) != 1:  # none, or two windows on that project: which has the chat can't be told, so neither
+        last_why = "no Cursor window has that project" if not owners else "more than one Cursor window has that project"
         return False
     try:
         with socket.socket(socket.AF_UNIX) as conn:
