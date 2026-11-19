@@ -170,9 +170,11 @@ CLOSE = 0.8  # similarity at which a spelling counts as the word: "Jervis" 0.83 
 
 
 def closeness(word: str, text: str) -> float:
-    """How near the nearest word in the text comes to the word (1.0: the word itself)."""
-    return max((difflib.SequenceMatcher(None, word.lower(), heard).ratio()
-                for heard in re.findall(r"[a-z]+", text.lower())), default=0.0)
+    """How near the text comes to the word (1.0: the word itself). One heard word, or two neighbours joined, so
+    "hench line" still counts as henchline."""
+    words = re.findall(r"[a-z]+", text.lower())
+    heard = words + [a + b for a, b in zip(words, words[1:])]
+    return max((difflib.SequenceMatcher(None, word.lower(), piece).ratio() for piece in heard), default=0.0)
 
 
 def said(word: str, text: str) -> bool:

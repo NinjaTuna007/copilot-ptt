@@ -35,13 +35,16 @@ class PlanView(private val activity: Activity) {
         }
     private val reading = 0xFFD5DDEB.toInt()
     private var showDone = false
-    private var shownFile = ""
+    private var seededFile: String? = null  // null until the first plan: an empty path is still a plan
 
     fun fill(list: LinearLayout, plan: JSONObject) {
         list.removeAllViews()
-        if (plan.optString("file") != shownFile) { shownFile = plan.optString("file"); showDone = false }
         val todos = plan.optJSONArray("todos") ?: JSONArray()
         val steps = (0 until todos.length()).mapNotNull { todos.optJSONObject(it) }
+        if (seededFile != plan.optString("file")) {
+            seededFile = plan.optString("file")
+            showDone = false  // finished steps start folded away
+        }
         list.addView(header(plan, steps), wide(8))
         if (steps.isNotEmpty()) {
             list.addView(draw.label("STEPS"), wide(20, 8))
@@ -102,14 +105,15 @@ class PlanView(private val activity: Activity) {
     private fun stepsCard(steps: List<JSONObject>, list: LinearLayout, plan: JSONObject): View {
         val card = card().apply { setPadding(0, dp(4), 0, dp(4)) }
         val done = steps.filter { it.optString("status") == "completed" }
-        val fold = steps.size > 6 && done.size >= 3 && !showDone
+        val canFold = done.isNotEmpty()
+        val fold = canFold && !showDone
         var first = true
         fun divider() {
             if (!first) card.addView(View(activity).apply { setBackgroundColor(colour(R.color.navy)) },
                 LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1)).apply { marginStart = dp(48) })
             first = false
         }
-        if (fold) {
+        if (canFold) {
             divider()
             card.addView(LinearLayout(activity).apply {
                 orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
@@ -117,8 +121,10 @@ class PlanView(private val activity: Activity) {
                 addView(mark("completed"))
                 addView(TextView(activity).apply { text = "${done.size} completed"; textSize = 15f; setTextColor(colour(R.color.muted)) },
                     LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = dp(12) })
-                addView(TextView(activity).apply { text = "Show"; textSize = 14f; setTextColor(colour(R.color.cyan)) })
-                setOnClickListener { showDone = true; fill(list, plan) }
+                addView(TextView(activity).apply {
+                    text = if (fold) "Show" else "Hide"; textSize = 14f; setTextColor(colour(R.color.cyan))
+                })
+                setOnClickListener { showDone = fold; fill(list, plan) }
             })
         }
         for (step in steps) {
@@ -206,12 +212,22 @@ class PlanView(private val activity: Activity) {
             "diagram" -> list.addView(card().apply {
                 background = rounded(colour(R.color.surface), 12, 1, colour(R.color.surface_high))
                 setPadding(dp(14), dp(14), dp(14), dp(14))
+                gravity = Gravity.CENTER_HORIZONTAL
                 addView(TextView(activity).apply {
-                    text = Html.fromHtml("<font color=\"#00E5FF\">◇</font>  Diagram — open on the laptop", Html.FROM_HTML_MODE_COMPACT)
-                    textSize = 14f; setTextColor(colour(R.color.text))
+                    text = "Diagram"; textSize = 12f; setTextColor(colour(R.color.cyan))
+                    letterSpacing = 0.08f
                 })
                 val nodes = b.optJSONArray("nodes")
-                if (nodes != null && nodes.length() > 0) addView(draw.small((0 until nodes.length()).joinToString(" → ") { nodes.optString(it) }))
+                for (n in 0 until (nodes?.length() ?: 0)) {
+                    if (n > 0) addView(TextView(activity).apply {
+                        text = "↓"; textSize = 16f; gravity = Gravity.CENTER; setTextColor(colour(R.color.cyan))
+                    }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(4) })
+                    addView(TextView(activity).apply {
+                        text = nodes!!.optString(n); textSize = 14f; gravity = Gravity.CENTER
+                        setTextColor(colour(R.color.text)); setPadding(dp(12), dp(10), dp(12), dp(10))
+                        background = rounded(colour(R.color.surface_high), 12)
+                    }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(4) })
+                }
             }, wide(4, 12))
             "table" -> {
                 val head = b.optJSONArray("head") ?: JSONArray()

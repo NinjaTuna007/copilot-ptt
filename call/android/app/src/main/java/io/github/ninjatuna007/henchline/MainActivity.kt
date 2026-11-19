@@ -103,8 +103,15 @@ class MainActivity : Activity() {
                 showCrew()
             }
         }
-        refresh.setColorSchemeColors(getColor(R.color.cyan))
-        refresh.setProgressBackgroundColorSchemeColor(getColor(R.color.surface))
+        findViewById<SwipeRefreshLayout>(R.id.refresh).apply {
+            setColorSchemeColors(getColor(R.color.cyan))
+            setProgressBackgroundColorSchemeColor(getColor(R.color.surface))
+        }
+        findViewById<SwipeRefreshLayout>(R.id.planRefresh).apply {
+            setColorSchemeColors(getColor(R.color.cyan))
+            setProgressBackgroundColorSchemeColor(getColor(R.color.surface))
+            setOnRefreshListener { refreshPlan() }
+        }
         refresh.setOnRefreshListener { if (tab == "usage") showUsage(fresh = true) else findCrew() }
         quoteBar.setOnClickListener { setQuote("") }  // tap it to stop replying
         findViewById<View>(R.id.settingsButton).visibility = View.GONE  // the header keeps only the title and you
@@ -364,7 +371,7 @@ class MainActivity : Activity() {
 
     override fun dispatchTouchEvent(event: MotionEvent): Boolean {
         // Selecting: a tap on a message picks it (or unpicks it), instead of opening it
-        if (selected != null && chatScreen.visibility == View.VISIBLE && panel?.isOpen != true) {
+        if (selected != null && chatScreen.visibility == View.VISIBLE && BottomPanel.top() == null) {
             val bar = selectBar
             val onBar = bar != null && android.graphics.Rect().also { bar.getGlobalVisibleRect(it) }.contains(event.rawX.toInt(), event.rawY.toInt())
             if (!onBar) when (event.actionMasked) {
@@ -387,7 +394,7 @@ class MainActivity : Activity() {
             }
         }
         // On the list screen, a sideways swipe moves to the tab beside (the user's wish, 2026-11-17)
-        if (listScreen.visibility == View.VISIBLE && panel?.isOpen != true && sheet?.isOpen != true) when (event.actionMasked) {
+        if (listScreen.visibility == View.VISIBLE && BottomPanel.top() == null && sheet?.isOpen != true) when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> { tabSwipeX = event.x; tabSwipeY = event.y }
             MotionEvent.ACTION_UP -> {
                 val dx = event.x - tabSwipeX
@@ -405,13 +412,18 @@ class MainActivity : Activity() {
                 tabSwipeX = -1f
             }
         }
-        if (chatScreen.visibility == View.VISIBLE && sheet?.isOpen != true) when (event.actionMasked) {
+        if (chatScreen.visibility == View.VISIBLE) when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> edgeStart = if (event.x < dp(24)) event.x else -1f
             MotionEvent.ACTION_UP -> {
                 if (edgeStart >= 0 && event.x - edgeStart > dp(100)) {
                     edgeStart = -1f
-                    // Back, as the system's back does: an open menu goes first (it stayed up over the list, 2026-11-16)
-                    if (panel?.isOpen == true) panel?.close() else show(listScreen)
+                    // The top menu first, then the one under it, and only then the chat (a second menu used to
+                    // stay drawn while this went back to the list, 2026-11-19)
+                    when {
+                        sheet?.isOpen == true -> sheet?.close()
+                        BottomPanel.top() != null -> BottomPanel.top()?.close()
+                        else -> show(listScreen)
+                    }
                     return true
                 }
                 edgeStart = -1f
@@ -422,9 +434,9 @@ class MainActivity : Activity() {
 
     @Deprecated("the platform Activity's back handling, kept for Android 10-12")
     override fun onBackPressed() {
-        when {  // back closes the sheet, then a chat or settings (to the list); only the list leaves the app
+        when {  // the top menu, then the one under it, then a chat or settings; only the list leaves the app
             sheet?.isOpen == true -> sheet?.close()
-            panel?.isOpen == true -> panel?.close()
+            BottomPanel.top() != null -> BottomPanel.top()?.close()
             selected != null -> stopSelecting()
             listScreen.visibility != View.VISIBLE -> show(listScreen)
             else -> super.onBackPressed()
@@ -637,7 +649,9 @@ class MainActivity : Activity() {
                 showConnected(onCall())
                 showCallBar()
                 if (buttonOnly) CallService.Bus.service?.send(JSONObject().put("button_only", true).toString())
-                if (stayOn) CallService.Bus.service?.send(JSONObject().put("stay_on", true).toString())
+                stayOn = stayDefault()
+                CallService.Bus.service?.send(JSONObject().put("stay_on", stayOn).toString())
+                sendCutDefault()
             }
             status.has("reconnecting") -> {  // the connection dropped mid-call: the bar says so until it's back
                 callWords = if (status.getBoolean("reconnecting")) "reconnecting…" else ""
@@ -803,11 +817,17 @@ class MainActivity : Activity() {
                 text = "Nothing matches \"$query\"."; setTextColor(getColor(R.color.muted)); setPadding(dp(20), dp(24), dp(20), dp(24))
             })
         }
-        val recent = chats.sortedByDescending { it.last?.optLong("at") ?: 0 }
-        val groups: List<Pair<String, List<Chat>>> = when (sortMode()) {
-            "project" -> recent.groupBy { it.project }.toList()
-            "agent" -> recent.groupBy { it.agent }.toList()
-            else -> listOf("" to recent)
+        val pins = pins()
+        val byRecent = chats.sortedByDescending { it.last?.optLong("at") ?: 0 }
+        val pinned = byRecent.filter { it.session in pins }
+        val rest = byRecent.filter { it.session !in pins }
+        val groups: List<Pair<String, List<Chat>>> = buildList {
+            if (pinned.isNotEmpty()) add("Pinned" to pinned)
+            addAll(when (sortMode()) {
+                "project" -> rest.groupBy { it.project }.toList()
+                "agent" -> rest.groupBy { it.agent }.toList()
+                else -> if (rest.isEmpty()) emptyList() else listOf("" to rest)
+            })
         }
         for ((heading, members) in groups) {
             if (heading.isNotEmpty()) crew.addView(TextView(this).apply {
@@ -817,6 +837,12 @@ class MainActivity : Activity() {
             })
             for (chat in members) crew.addView(chatRow(chat.session, chat.agent, chat.project, chat.last, chat.found))
         }
+        crew.addView(TextView(this).apply {
+            text = "Settings"
+            setTextColor(getColor(R.color.muted)); textSize = 13f; gravity = Gravity.CENTER
+            setPadding(dp(20), dp(28), dp(20), dp(36))
+            setOnClickListener { show(settingsScreen) }
+        })
         val name = names[current] ?: prefs().getString("current_name", "")?.ifEmpty { null }.takeIf { current.isNotEmpty() }
         who.text = name?.substringBefore(",") ?: "Henchline"
         avatar.setImageResource(if (name != null) avatarOf(current) else R.drawable.avatar_handsfree)
@@ -1114,6 +1140,11 @@ class MainActivity : Activity() {
             later(entered.removePrefix("/later").trim())
             return
         }
+        if (entered == "/show" || entered.startsWith("/show ")) {
+            text.setText("")
+            showGrab(entered.removePrefix("/show").trim())
+            return
+        }
         if (entered.startsWith("/") && entered.drop(1) in PHONE_COMMANDS) {  // the phone's own: done here, not typed in
             text.setText("")
             runCommand(entered.drop(1))
@@ -1248,6 +1279,7 @@ class MainActivity : Activity() {
                 cutIn = on
                 service.send(JSONObject().put("cut_in", on).toString())
             },
+            onVoices = { voices() },
             onHangUp = { hangUp() }).also { it.show() }
     }
 
@@ -1407,9 +1439,7 @@ class MainActivity : Activity() {
         talk.visibility = shown
         findViewById<View>(R.id.inputRow).visibility = if (typing) View.VISIBLE else View.GONE
         // Off a call: the kept chat with the last agent, read-only, or the henchman and how to call
-        val readable = on || chat.childCount > (if (workingRow?.parent === chat) 1 else 0)  // not the bubble alone
-        chatScroll.visibility = if (readable) View.VISIBLE else View.GONE
-        findViewById<View>(R.id.idle).visibility = if (readable) View.GONE else View.VISIBLE
+        showChatBody()
         showClear(CallService.Bus.service?.clear ?: prefs().getBoolean("clear", true))
         if (!on) {
             state.text = subtitle(if (CallService.Bus.connected) "Texting · on a call with ${names[callSession]?.substringBefore(",") ?: "your crew"}"
@@ -1471,19 +1501,16 @@ class MainActivity : Activity() {
         if (!note && at > 0) row.setTag(R.id.ats, listOf(at))
         row.addView(bubble, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT,
             LinearLayout.LayoutParams.WRAP_CONTENT).apply { if (!note) width = LinearLayout.LayoutParams.WRAP_CONTENT })
-        if (mine && !note) {  // you: the boss the crew works for
-            row.addView(ImageView(this).apply { setImageResource(R.drawable.avatar_you) },
+        if (mine && !note) {  // you: the boss the crew works for, the vacation face while away
+            row.addView(ImageView(this).apply { setImageResource(youFace()); tag = "you" },
                 LinearLayout.LayoutParams(dp(28), dp(28)).apply { marginStart = dp(8) })
         }
         bubble.maxWidth = (resources.displayMetrics.widthPixels * 0.7).toInt()
         chat.addView(row, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.WRAP_CONTENT))
         // A new chat opens empty, showing the henchman instead of the lines: its first line brings the lines back
-        // (a first text was sent but never shown, 2026-11-16)
-        if (chatScroll.visibility != View.VISIBLE && row.visibility == View.VISIBLE) {
-            chatScroll.visibility = View.VISIBLE
-            findViewById<View>(R.id.idle).visibility = View.GONE
-        }
+        // (a first text was sent but never shown, 2026-11-16). On the Plan tab the lines stay underneath.
+        if (row.visibility == View.VISIBLE) showChatBody()
         chatScroll.post { chatScroll.fullScroll(View.FOCUS_DOWN) }
         return bubble
     }
@@ -1960,7 +1987,7 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams(dp(28), dp(28)).apply { marginEnd = dp(8) })
         row.addView(bubble, LinearLayout.LayoutParams((resources.displayMetrics.widthPixels * 0.68).toInt(),
             LinearLayout.LayoutParams.WRAP_CONTENT))
-        if (mine) row.addView(ImageView(this).apply { setImageResource(R.drawable.avatar_you) },
+        if (mine) row.addView(ImageView(this).apply { setImageResource(youFace()); tag = "you" },
             LinearLayout.LayoutParams(dp(28), dp(28)).apply { marginStart = dp(8) })
         chat.addView(row, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
     }
@@ -2124,6 +2151,14 @@ class MainActivity : Activity() {
 
     private fun sortMode() = prefs().getString("sort", "recent") ?: "recent"
 
+    private fun pins(): Set<String> = prefs().getStringSet("pinned", emptySet())?.toSet() ?: emptySet()
+
+    private fun setPinned(session: String, on: Boolean) {
+        val next = pins().toMutableSet()
+        if (on) next.add(session) else next.remove(session)
+        prefs().edit().putStringSet("pinned", next).apply()
+    }
+
     /** A chat in the list: henchman, project, the agent's name and the last line (or the line a search found). */
     private fun chatRow(session: String, agent: String, project: String, last: JSONObject?, found: String): View {
         val unread = unread(session, last)
@@ -2139,7 +2174,7 @@ class MainActivity : Activity() {
         val words = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(14), 0, 0, 0) }
         val top = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         top.addView(TextView(this).apply {
-            text = project.replace("_", " ")
+            text = (if (session in pins()) "📌 " else "") + project.replace("_", " ")
             setTextColor(getColor(R.color.text)); textSize = 17f; typeface = android.graphics.Typeface.DEFAULT_BOLD
             maxLines = 1; ellipsize = android.text.TextUtils.TruncateAt.END
         }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
@@ -2176,7 +2211,7 @@ class MainActivity : Activity() {
 
     /** One screen at a time: the chat list, a chat, or settings. */
     private fun show(screen: View) {
-        if (panel?.isOpen == true) panel?.close(animate = false)  // a menu belongs to the screen it opened on
+        BottomPanel.closeAll()  // a menu belongs to the screen it opened on, including one opened on top of another
         if (screen !== chatScreen) stopSelecting()  // and a selection to the chat it was made in
         (shownUndo?.parent as? android.view.ViewGroup)?.removeView(shownUndo)
         for (s in listOf(listScreen, chatScreen, settingsScreen)) s.visibility = if (s === screen) View.VISIBLE else View.GONE
@@ -2241,7 +2276,8 @@ class MainActivity : Activity() {
         ask("/crew/models?only=now&session=" + android.net.Uri.encode(session), null) { answer ->
             val now = answer.optString("label").ifEmpty { answer.optString("now") }  // model · effort · context
             if (now.isNotEmpty() && session == current) {
-                chip.text = "✦ " + (answer.optString("label").ifEmpty { shortModel(now) })
+                chip.text = "✦ " + shortModel(now)  // family and effort; context stays in the sheet
+                chip.contentDescription = "Model: $now. Tap to switch."
                 prefs().edit().putString("model_$session", now).apply()
             }
             showPlan(session, answer.optString("mode"))
@@ -2255,6 +2291,8 @@ class MainActivity : Activity() {
         chip.visibility = if (shows) View.VISIBLE else View.GONE
         if (!shows) return
         val on = mode == "plan"
+        planning = on
+        if (findViewById<View>(R.id.planRefresh).visibility == View.VISIBLE) showBuildBar(lastPlan)
         // Not a second model pill (the design review): an outlined option while in agent mode, solid cyan in plan mode
         chip.text = if (on) "☰ Plan" else "◇ Agent"
         chip.setTextColor(getColor(if (on) R.color.navy else R.color.muted))
@@ -2287,9 +2325,15 @@ class MainActivity : Activity() {
 
     private fun refreshPlan() {
         val session = current
-        if (session.isEmpty() || Files.origin(this) == null) return
+        if (session.isEmpty() || Files.origin(this) == null) {
+            findViewById<SwipeRefreshLayout>(R.id.planRefresh).isRefreshing = false
+            return
+        }
         ask("/chat/plan?session=" + android.net.Uri.encode(session), null) { answer ->
-            if (session != current) return@ask
+            if (session != current) {
+                findViewById<SwipeRefreshLayout>(R.id.planRefresh).isRefreshing = false
+                return@ask
+            }
             val bar = findViewById<View>(R.id.planBar)
             val todos = answer.optJSONArray("todos")
             if (todos == null) {
@@ -2297,17 +2341,19 @@ class MainActivity : Activity() {
                     bar.visibility = View.GONE
                     showChatTab()
                 }
+                findViewById<SwipeRefreshLayout>(R.id.planRefresh).isRefreshing = false
                 return@ask
             }
             bar.visibility = View.VISIBLE
             lastPlan = answer
-            if (findViewById<View>(R.id.planScroll).visibility != View.VISIBLE) showPlanSwitch(answer, onPlan = false)
+            if (findViewById<View>(R.id.planRefresh).visibility != View.VISIBLE) showPlanSwitch(answer, onPlan = false)
             findViewById<View>(R.id.chatTab).setOnClickListener { showChatTab() }
             findViewById<View>(R.id.planTab).setOnClickListener { showPlanTab(answer) }
             val key = answer.optString("name") + " " + answer.optInt("done") + "/" + answer.optInt("total") + " " + todos
-            val showing = findViewById<View>(R.id.planScroll).visibility == View.VISIBLE
-            if (showing && key != planKey) showPlanTab(answer)
+            val showing = findViewById<View>(R.id.planRefresh).visibility == View.VISIBLE
+            if (showing && (key != planKey || findViewById<SwipeRefreshLayout>(R.id.planRefresh).isRefreshing)) showPlanTab(answer)
             planKey = key
+            findViewById<SwipeRefreshLayout>(R.id.planRefresh).isRefreshing = false
         }
     }
 
@@ -2342,6 +2388,28 @@ class MainActivity : Activity() {
             visibility = if (on) View.VISIBLE else View.GONE
             text = android.text.Html.fromHtml("<font color=\"#00E5FF\">Away</font> · agents text you", android.text.Html.FROM_HTML_MODE_COMPACT)
         }
+        findViewById<TextView>(R.id.chatAway).apply {
+            visibility = if (on) View.VISIBLE else View.GONE
+            text = android.text.Html.fromHtml("Away · replies come as texts · <font color=\"#00E5FF\">Back</font>",
+                android.text.Html.FROM_HTML_MODE_COMPACT)
+            setOnClickListener { if (away) toggleAway(false) }
+        }
+        refreshYouFaces()
+    }
+
+    /** The face beside your own lines: the vacation one while you're away, the headset otherwise. */
+    private fun youFace() = if (away) R.drawable.avatar_you_away else R.drawable.avatar_you
+
+    private fun refreshYouFaces() {
+        val face = youFace()
+        fun walk(group: android.view.ViewGroup) {
+            for (i in 0 until group.childCount) {
+                val child = group.getChildAt(i)
+                if (child is ImageView && child.tag == "you") child.setImageResource(face)
+                else if (child is android.view.ViewGroup) walk(child)
+            }
+        }
+        findViewById<android.view.ViewGroup>(R.id.chat)?.let { walk(it) }
     }
 
     /** Holding your avatar: you, Available or Away, and Settings (the design review, 2026-11-17). */
@@ -2393,6 +2461,88 @@ class MainActivity : Activity() {
         section(soundRow, "CALLS")
         section(thoughts, "CHATS")
         section(server, "LAPTOP")
+
+        fun line(title: String, value: TextView, onClick: () -> Unit) = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(20), dp(12), dp(20), dp(12))
+            setOnClickListener { onClick() }
+            addView(TextView(this@MainActivity).apply {
+                text = title; textSize = 16f; setTextColor(getColor(R.color.text))
+            }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            value.textSize = 14f
+            value.setTextColor(getColor(R.color.cyan))
+            addView(value)
+        }
+        val stayValue = TextView(this)
+        val cutValue = TextView(this)
+        fun showDefaults() {
+            stayValue.text = if (stayDefault()) "Stay on" else "Check on me"
+            cutValue.text = when (cutDefault()) { "in" -> "Cut in"; "wait" -> "Let it wait"; else -> "Follow the agent" }
+        }
+        showDefaults()
+        list.addView(UsageDraw(this).label("VOICES").apply { setPadding(dp(20), dp(24), dp(20), dp(6)) })
+        list.addView(line("Agents' voices", TextView(this).apply { text = "Choose"; textSize = 14f; setTextColor(getColor(R.color.cyan)) }) { voices() })
+        list.addView(TextView(this).apply {
+            text = "Each agent its own, one voice for all, or surprise me. A tap on a voice picks the next one."
+            textSize = 13f; setTextColor(getColor(R.color.muted)); setPadding(dp(20), 0, dp(20), dp(10))
+        })
+        list.addView(UsageDraw(this).label("NEW CALLS").apply { setPadding(dp(20), dp(24), dp(20), dp(6)) })
+        list.addView(line("Stay or check", stayValue) {
+            prefs().edit().putBoolean("stay_default", !stayDefault()).apply(); showDefaults()
+        })
+        list.addView(line("Cut in", cutValue) {
+            val next = when (cutDefault()) { "auto" -> "in"; "in" -> "wait"; else -> "auto" }
+            prefs().edit().putString("cut_default", next).apply(); showDefaults()
+        })
+        list.addView(TextView(this).apply {
+            text = "How the next call starts. The call menu changes the call you're on."
+            textSize = 13f; setTextColor(getColor(R.color.muted)); setPadding(dp(20), 0, dp(20), dp(10))
+        })
+        val version = try { packageManager.getPackageInfo(packageName, 0).versionName ?: "" } catch (_: Exception) { "" }
+        list.addView(UsageDraw(this).label("ABOUT").apply { setPadding(dp(20), dp(24), dp(20), dp(6)) })
+        list.addView(line("Henchline", TextView(this).apply { text = version; textSize = 14f; setTextColor(getColor(R.color.muted)) }) {
+            android.app.AlertDialog.Builder(this).setTitle("Henchline").setMessage("Version $version").setPositiveButton("OK", null).show()
+        })
+    }
+
+    private fun stayDefault() = prefs().getBoolean("stay_default", true)
+
+    private fun cutDefault() = prefs().getString("cut_default", "auto") ?: "auto"
+
+    /** The saved line for a new call: cut in, let it wait, or follow the agent. */
+    private fun sendCutDefault() {
+        val service = CallService.Bus.service ?: return
+        when (cutDefault()) {
+            "in" -> { cutIn = true; service.send(JSONObject().put("cut_in", true).toString()) }
+            "wait" -> { cutIn = false; service.send(JSONObject().put("cut_in", false).toString()) }
+            else -> { cutIn = null; service.send(JSONObject().put("cut_in", "auto").toString()) }
+        }
+    }
+
+    /** The voices sheet: the laptop keeps the choice, and plays a short preview. */
+    private fun voices() {
+        if (Files.origin(this) == null) return
+        ask("/voices", null) { answer ->
+            if (!answer.has("showing")) {
+                android.widget.Toast.makeText(this, answer.optString("note").ifEmpty { "Couldn't reach the laptop." },
+                    android.widget.Toast.LENGTH_LONG).show()
+                return@ask
+            }
+            panel = VoicesSheet(this, answer, save = { change, then ->
+                ask("/voices", change) { saved ->
+                    if (saved.has("showing")) then(saved)
+                    else android.widget.Toast.makeText(this, saved.optString("note").ifEmpty { "Couldn't save that." },
+                        android.widget.Toast.LENGTH_LONG).show()
+                }
+            }, preview = { voice ->
+                ask("/voices/preview", JSONObject().put("voice", voice)) { heard ->
+                    val url = heard.optString("url")
+                    if (url.isEmpty()) android.widget.Toast.makeText(this, heard.optString("note").ifEmpty { "Couldn't play that." },
+                        android.widget.Toast.LENGTH_LONG).show()
+                    else playOrPause(url, ImageButton(this), TextView(this), "Preview")
+                }
+            }).also { it.show() }
+        }
     }
 
     private fun toggleAway(to: Boolean = !away, undo: Boolean = true) {
@@ -2406,6 +2556,14 @@ class MainActivity : Activity() {
                 return@ask
             }
             showAway(answer.optBoolean("away"))
+            if (to && answer.optBoolean("away") && !prefs().getBoolean("away_card", false)) {
+                prefs().edit().putBoolean("away_card", true).apply()
+                android.app.AlertDialog.Builder(this)
+                    .setTitle("Away")
+                    .setMessage("The laptop stops listening. Agents are told, and they text you. Push-to-talk still works.")
+                    .setPositiveButton("OK", null)
+                    .show()
+            }
             if (undo) undoBar(if (to) "You're away. Agents will text you." else "Back. Agents will speak again.") { toggleAway(!to, undo = false) }
         }
     }
@@ -2439,9 +2597,18 @@ class MainActivity : Activity() {
         ask("/away", null) { answer -> if (answer.has("away")) showAway(answer.optBoolean("away")) }
     }
 
+    /** The henchman and "call your crew" fill an empty chat. The Plan tab has its own page, so they stay off it,
+     *  even before the chat's lines have loaded. */
+    private fun showChatBody() {
+        val lines = chat.childCount > (if (workingRow?.parent === chat) 1 else 0)
+        val onPlan = findViewById<View>(R.id.planRefresh).visibility == View.VISIBLE
+        chatScroll.visibility = if ((onCall() || lines) && !onPlan) View.VISIBLE else View.GONE
+        findViewById<View>(R.id.idle).visibility = if (onCall() || lines || onPlan) View.GONE else View.VISIBLE
+    }
+
     private fun showChatTab() {
-        findViewById<View>(R.id.chatScroll).visibility = View.VISIBLE
-        findViewById<View>(R.id.planScroll).visibility = View.GONE
+        findViewById<View>(R.id.planRefresh).visibility = View.GONE
+        showChatBody()
         showPlanSwitch(lastPlan, onPlan = false)
     }
 
@@ -2450,10 +2617,11 @@ class MainActivity : Activity() {
     private var buildButton: TextView? = null
     private var buildSent = ""  // the plan whose build was asked for, until the plan changes
     private var buildSentAt = 0L  // and when: after 2 min with no step under way, Build can be sent again
+    private var planning = false  // the chip's mode: Build this is only for approving a plan
 
     private fun showPlanTab(plan: JSONObject) {
-        findViewById<View>(R.id.chatScroll).visibility = View.GONE
-        findViewById<View>(R.id.planScroll).visibility = View.VISIBLE
+        findViewById<View>(R.id.planRefresh).visibility = View.VISIBLE
+        showChatBody()
         showPlanSwitch(plan, onPlan = true)
         val list = findViewById<LinearLayout>(R.id.planList)
         list.setPadding(0, 0, 0, dp(88))  // room above the sticky button
@@ -2464,7 +2632,7 @@ class MainActivity : Activity() {
     /** "Build this", pinned at the bottom of the Plan tab over a fade (the design review): hidden when every step is
      *  done, "Building · step n of m" while one is in progress, "Sent…" once tapped. */
     private fun showBuildBar(plan: JSONObject?) {
-        val holder = findViewById<View>(R.id.planScroll).parent as android.widget.FrameLayout
+        val holder = findViewById<View>(R.id.planRefresh).parent as android.widget.FrameLayout
         val bar = buildBar ?: LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             background = android.graphics.drawable.GradientDrawable(android.graphics.drawable.GradientDrawable.Orientation.BOTTOM_TOP,
@@ -2482,7 +2650,7 @@ class MainActivity : Activity() {
         val steps = (0 until (todos?.length() ?: 0)).map { todos!!.getJSONObject(it) }
         val done = steps.count { it.optString("status") == "completed" }
         val going = steps.indexOfFirst { it.optString("status") == "in_progress" }
-        val showing = plan != null && findViewById<View>(R.id.planScroll).visibility == View.VISIBLE
+        val showing = plan != null && planning && findViewById<View>(R.id.planRefresh).visibility == View.VISIBLE
         bar.visibility = if (showing && (steps.isEmpty() || done < steps.size)) View.VISIBLE else View.GONE
         val button = buildButton ?: return
         fun pill(fill: Int, ink: Int) {
@@ -2662,14 +2830,18 @@ class MainActivity : Activity() {
         }
     }
 
-    /** /usage and /context: this chat's agent's plan limits and context, as bars (the user's wish, 2026-11-17: what
-     *  Claude's /usage shows in its terminal, on the phone, and the same for Codex and Cursor). */
-    private fun usage() {
+    /** /usage and /context: the bars, and the same readout typed into the agent (not as the slash command). */
+    private fun usage(which: String = "usage") {
         val session = current.ifEmpty { return }
         ask("/crew/usage?session=" + android.net.Uri.encode(session), null) { answer ->
             if (!answer.has("agent")) return@ask android.widget.Toast.makeText(this,
                 answer.optString("note").ifEmpty { "No usage to show." }, android.widget.Toast.LENGTH_LONG).show()
             panel = UsageSheet(this, answer).also { it.show() }
+            ask("/crew/usage/tell", JSONObject().put("session", session).put("which", which)) { told ->
+                told.optString("note").takeIf { it.isNotEmpty() }?.let {
+                    android.widget.Toast.makeText(this, it, android.widget.Toast.LENGTH_LONG).show()
+                }
+            }
         }
     }
 
@@ -2985,6 +3157,7 @@ class MainActivity : Activity() {
         "usage" to "Plan limits and context, as bars", "context" to "How full the context is, and what fills it",
         "workflow" to "This chat's workflows: phases and agents, live",
         "away" to "Away on or off: no listening at the laptop, agents text you instead of speaking",
+        "show" to "A picture of this terminal, the screen, or one window",
     ).map { (name, about) -> JSONObject().put("name", name).put("about", about).put("kind", "phone") }
 
     private fun loadCommands(session: String) {
@@ -3038,14 +3211,52 @@ class MainActivity : Activity() {
             }
             "call" -> call()
             "later" -> later("")
-            "usage", "context" -> usage()
+            "usage", "context" -> usage(name)
             "workflow" -> workflows()
             "away" -> ask("/away", JSONObject()) { answer ->
                 android.widget.Toast.makeText(this, if (answer.optBoolean("away"))
                     "Away: the laptop isn't listening, and agents text you instead of speaking. /away again, or a call, ends it."
                     else "Back: hands-free listens and agents speak at the laptop again.", android.widget.Toast.LENGTH_LONG).show()
             }
+            "show" -> showGrab("")
         }
+    }
+
+    /** /show, /show screen, or /show thunderbird: a picture into this chat. No words: pick from the windows. */
+    private fun showGrab(query: String) {
+        val session = current.ifEmpty { return }
+        fun send(what: String, id: String = "") {
+            ask("/show", JSONObject().put("session", session).put("what", what).put("id", id).put("query", query)
+                .put("words", "Here.")) { answer ->
+                val matches = answer.optJSONArray("matches")
+                if (matches != null && matches.length() != 1) {
+                    showWindows((0 until matches.length()).map { matches.getJSONObject(it) })
+                    return@ask
+                }
+                android.widget.Toast.makeText(this, answer.optString("note").ifEmpty {
+                    if (answer.optBoolean("ok")) "Picture sent." else "Couldn't take that picture."
+                }, android.widget.Toast.LENGTH_LONG).show()
+            }
+        }
+        when {
+            query.isEmpty() -> ask("/show/windows", null) { answer ->
+                showWindows(answer.optJSONArray("windows")?.let { list -> (0 until list.length()).map { list.getJSONObject(it) } }
+                    ?: emptyList())
+            }
+            query == "screen" -> send("screen")
+            query.startsWith("0x") -> send("window", query)
+            else -> send("find")
+        }
+    }
+
+    private fun showWindows(windows: List<JSONObject>) {
+        panel = ShowSheet(this, windows) { what, id ->
+            ask("/show", JSONObject().put("session", current).put("what", what).put("id", id).put("words", "Here.")) { answer ->
+                android.widget.Toast.makeText(this, answer.optString("note").ifEmpty {
+                    if (answer.optBoolean("ok")) "Picture sent." else "Couldn't take that picture."
+                }, android.widget.Toast.LENGTH_LONG).show()
+            }
+        }.also { it.show() }
     }
 
     /** /later: the words go to this chat's agent at a time picked here (the laptop types them in then, even with
@@ -3073,7 +3284,9 @@ class MainActivity : Activity() {
     private fun chatMenu(session: String, project: String, agent: String, clearOnly: Boolean = false) {
         val lines = Chats.load(this, session)
         val saved = Media.onlyIn(this, session, Media.savedFor(this, lines), except = lines.map { it.optLong("at") }.toSet())
+        val pinned = session in pins()
         panel = ChatActionsSheet(this, agent, project.replace("_", " "), startedHere(session), gone = session !in names,
+            pinned = pinned, onPin = { on -> setPinned(session, on); showCrew() },
             savedFiles = saved.size,
             onClear = { alsoFiles ->
                 Chats.clear(this, session)
@@ -3084,6 +3297,7 @@ class MainActivity : Activity() {
                 showCrew()
             },
             onRemove = {
+                setPinned(session, false)
                 Chats.clear(this, session)
                 names = names - session
                 val kept = org.json.JSONArray(prefs().getString("crew", "[]"))
@@ -3096,6 +3310,7 @@ class MainActivity : Activity() {
                 ask("/crew/end", JSONObject().put("session", session)) { answer ->
                     if (!answer.optBoolean("ok")) return@ask done(answer.optString("note").ifEmpty { "Not ended." })
                     done(null)
+                    setPinned(session, false)
                     Chats.clear(this, session)
                     names = names - session
                     val kept = org.json.JSONArray(prefs().getString("crew", "[]"))
@@ -3651,7 +3866,7 @@ class MainActivity : Activity() {
         if (!mine && from.isNotEmpty()) row.addView(ImageView(this).apply { setImageResource(avatarOf(session.ifEmpty { from })) },
             LinearLayout.LayoutParams(dp(28), dp(28)).apply { marginEnd = dp(8) })
         row.addView(bubble)
-        if (mine) row.addView(ImageView(this).apply { setImageResource(R.drawable.avatar_you) },
+        if (mine) row.addView(ImageView(this).apply { setImageResource(youFace()); tag = "you" },
             LinearLayout.LayoutParams(dp(28), dp(28)).apply { marginStart = dp(8) })
         chat.addView(row, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
     }
@@ -3704,7 +3919,7 @@ class MainActivity : Activity() {
                 prefs.edit().putString(CALL_KEY, it).apply()
             }
         }
-        val PHONE_COMMANDS = setOf("stop", "model", "flush", "call", "later", "usage", "context", "workflow", "away")
+        val PHONE_COMMANDS = setOf("stop", "model", "flush", "call", "later", "usage", "context", "workflow", "away", "show")
         const val OPEN_FILE = "io.github.ninjatuna007.henchline.OPEN_FILE"  // a file's notification, tapped
 
         /** Each agent's henchman, by its session (claude-…, cursor-…, codex-…) or its name. */

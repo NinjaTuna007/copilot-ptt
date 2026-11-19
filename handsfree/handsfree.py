@@ -40,8 +40,8 @@
                                        is up, else a Henchline notification (an ntfy one if Henchline can't
                                        be pushed) that saves and opens it. Any type; kept 7 days. Exit 0 sent,
                                        1 not
-    handsfree show [--screen] [WORDS]
-                                       "show me": a picture of the terminal pane this agent runs in (drawn from
+    handsfree show [--screen | --window 0xID] [WORDS]
+                                       "show me": a picture of this terminal, one window, or the whole screen
                                        tmux's own text, works with the screen locked), or with --screen the whole
                                        screen (also when it isn't in tmux), sent as `handsfree send` does
 
@@ -247,35 +247,38 @@ def send(args: list[str]) -> int:
 
 def show(args: list[str]) -> int:
     """A picture of what the agent running this sees, into the call's chat (or the phone): its own terminal pane,
-    or with --screen the whole screen; the user's "show me". The rest of the arguments are the words that go with it."""
+    one window (`--window 0xID`, its own pixels, so a locked screen still shows that window), or `--screen` for
+    the whole screen. The rest of the arguments are the words that go with it."""
     from voice import screenshot
     whole = "--screen" in args
+    wid = ""
+    if "--window" in args:
+        at = args.index("--window")
+        if at + 1 >= len(args):
+            print("usage: handsfree show [--screen | --window 0xID] [WORDS]")
+            return 1
+        wid = args[at + 1]
+        args = args[:at] + args[at + 2:]
     words = [a for a in args if a != "--screen"]
     if any(a.startswith("--") for a in words):
-        print("usage: handsfree show [--screen] [WORDS]")
+        print("usage: handsfree show [--screen | --window 0xID] [WORDS]")
         return 1
-    path = screenshot.folder() / screenshot.name()
-    pane = ""
-    if not whole:
+    if wid:
+        match = next((item for item in screenshot.windows() if item["id"] == wid), None)
+        label = (match["title"] or match["app"]) if match else "a window"
+        path, why = screenshot.take("window", wid, of=label)
+    elif whole:
+        path, why = screenshot.take("screen", of="the whole screen")
+    else:
         speaker = caller()
         tab = speaker.tab if speaker and speaker.tab and speaker.tab.owner == "tmux" else None
         pane = tab.address if tab else os.environ.get("TMUX_PANE", "")
-        shown = screenshot.pane_text(pane) if pane else None
-        try:
-            if shown is not None:
-                screenshot.draw(shown, path)
-            elif pane:  # its pane is known but can't be read: not the screen instead
-                print("couldn't read that terminal pane")
-                return 1
-            else:
-                pane = ""
-        except (ImportError, OSError) as exc:
-            print(f"couldn't draw the terminal: {exc}")
-            return 1
-    if not pane:  # not in tmux (a Konsole tab, a Cursor chat, a page): the screen as it is
-        if screenshot.screen(path) is None:
-            print("couldn't take a picture: no tmux pane to draw, and no screenshot tool (spectacle, ImageMagick)")
-            return 1
+        path, why = screenshot.take("pane", pane=pane)
+        if path is None and not pane:  # not in tmux: the screen, as before
+            path, why = screenshot.take("screen")
+    if path is None:
+        print(why)
+        return 1
     return send([str(path), *words])
 
 
@@ -327,10 +330,14 @@ def text(words: str, until_read: float = 0, until: str = "read", as_session: str
         print(f"sent to the call's chat (id {tid})")
         sent = True
     elif CALL_RING.exists() and push(json.dumps({"agent": agent, "session": session, "text": words,
-                                                  "id": tid}).encode()):
+                                                  "id": tid}).encode(),
+                                      {"Priority": "high", "Tags": "speech_balloon"}):
         log(HANDSFREE_LOG, f"{agent} texted the phone")
         print(f"sent to the phone (id {tid})")
         sent = True
+        subprocess.Popen(  # not a thread: this command must return now, and the backup still runs after 8 s
+            [sys.executable, str(Path(__file__).resolve()), "text-backup", tid],
+            start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if sent:
         if until_read <= 0:
             return 0
@@ -360,11 +367,26 @@ def text_status(tid: str) -> str:
     return str(read_json(TEXTS / f"{tid}.json").get("status", "")) if tid else ""
 
 
-def push(body: bytes) -> bool:
+def _backup_text(tid: str) -> None:
+    """The app push can be accepted and still never shown (the phone asleep, or its address stale). If the phone
+    hasn't confirmed the text, say it as a normal notification too. Run as its own process: the text command
+    itself must return at once."""
+    time.sleep(8)
+    record = read_json(TEXTS / f"{tid}.json")
+    if record.get("status") != "sent":
+        return
+    topic = RING_TOPIC.read_text().strip() if RING_TOPIC.exists() else ""
+    agent = str(record.get("agent") or "Henchline")
+    if topic and ntfy(topic, agent.capitalize(), str(record.get("words") or ""),
+                      {"Tags": "speech_balloon", "Priority": "high"}):
+        log(HANDSFREE_LOG, f"{agent} text not confirmed by the phone: sent the backup notification")
+
+
+def push(body: bytes, headers: dict | None = None) -> bool:
     """Henchline's own push address (the ntfy app wakes it): never printed."""
     try:
         urllib.request.urlopen(urllib.request.Request(CALL_RING.read_text().strip(), data=body,
-                                                      headers={"Content-Type": "application/json"}),
+                                                      headers={"Content-Type": "application/json", **(headers or {})}),
                                timeout=10).close()
         return True
     except (OSError, ValueError) as exc:
@@ -607,6 +629,9 @@ def main() -> int:
                 args = args[:at] + args[at + 2:]
                 until = flag.removeprefix("--until-")
         return text(" ".join(args), minutes, until, as_session)
+    if command == "text-backup" and args:  # internal: the 8 s backup, detached so `handsfree text` returns now
+        _backup_text(args[0])
+        return 0
     if command == "text-status":
         status = text_status(args[0] if args else "")
         down = subprocess.run(["systemctl", "--user", "is-active", "--quiet", "call.service"]).returncode != 0

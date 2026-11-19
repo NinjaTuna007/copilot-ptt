@@ -265,6 +265,41 @@ def cursor(record: dict) -> dict:
     return {"model": str(model or ""), "limits": limits, "context": context, "notes": notes}
 
 
+def _amount(n: int) -> str:
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M".replace(".0M", "M")
+    if n >= 1_000:
+        return f"{n // 1_000}K"
+    return str(n)
+
+
+def words(found: dict, which: str) -> str:
+    """The readout typed into the agent. `usage` is the plan limits; `context` is the window. The bars stay on the phone."""
+    if which == "context":
+        context = found.get("context") if isinstance(found.get("context"), dict) else None
+        if not context or not isinstance(context.get("percent"), (int, float)):
+            return "Context hasn't been reported for this chat."
+        line = f"Context is {context['percent']:g}% full"
+        size, used = int(context.get("size") or 0), int(context.get("used") or 0)
+        if size:
+            line += f", {_amount(used)} of {_amount(size)}"
+        line += "."
+        parts = [p for p in (context.get("parts") or []) if isinstance(p, dict)]
+        if parts:
+            line += " " + ", ".join(f"{p.get('label', '?')} {_amount(int(p.get('tokens') or 0))}" for p in parts[:8]) + "."
+        return line
+    limits = [item for item in (found.get("limits") or []) if isinstance(item, dict)]
+    notes = [str(note) for note in (found.get("notes") or []) if str(note).strip()]
+    if not limits and not notes:
+        return "Usage hasn't been reported here."
+    line = "Usage: " + ", ".join(f"{item.get('label', 'Limit')} {item.get('percent', 0):g}%" for item in limits) + "."
+    if notes:
+        line += " " + " ".join(notes)
+        if not line.endswith("."):
+            line += "."
+    return line
+
+
 def overview(fresh: bool = False) -> list[dict]:
     """Every AI on the laptop at once, for the phone's Usage tab: each one's plan limits (the account's, not one
     chat's), from its newest report. [{agent, limits, notes}]."""

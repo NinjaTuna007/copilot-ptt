@@ -62,5 +62,18 @@ class CodexName(unittest.TestCase):
             self.assertEqual(usage.codex_name("codex-_elsewhere", root), "")
 
 
+class Readout(unittest.TestCase):
+    def test_usage_and_context_are_different_sentences(self):
+        found = {"limits": [{"label": "Week", "percent": 12}], "notes": ["Plan: Pro"],
+                 "context": {"percent": 21, "size": 500000, "used": 100000,
+                             "parts": [{"label": "Chat", "tokens": 80000}]}}
+        self.assertIn("Week 12%", usage.words(found, "usage"))
+        self.assertNotIn("Context", usage.words(found, "usage"))
+        self.assertIn("21% full", usage.words(found, "context"))
+        self.assertIn("Chat 80K", usage.words(found, "context"))
+        self.assertEqual(usage.words({}, "usage"), "Usage hasn't been reported here.")
+        self.assertEqual(usage.words({}, "context"), "Context hasn't been reported for this chat.")
+
+
 if __name__ == "__main__":
     unittest.main()

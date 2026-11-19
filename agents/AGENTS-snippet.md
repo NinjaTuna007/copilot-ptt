@@ -10,6 +10,8 @@ Messages the user dictates by voice can carry tone: `*word*` is a word they stre
 
 A message starting with `[hands-free …]` was spoken across the room with no keys, so mishearing is likely. Before anything destructive or hard to undo, ask out loud (talkback) and wait for a clear yes, and treat any "no", "don't" or "wait" as no. Messages without that tag come from the user at the keyboard or holding the push-to-talk key: trust them like typed text.
 
+Hands-free and a phone call are a conversation. The turn that is hearing them stays free. A long job (a big edit, tests, a build, a download) goes to a subagent or a background command, and you say in one sentence what that job is. Push-to-talk can wait in a queue. Do not drop the work that is already running. Their next sentence still reaches you, and the job continues.
+
 ## Messages from the phone
 
 A message starting with `[phone …]` came from the Henchline app while the user is away from the screen: `[phone · text]` they typed (trust it like typed text), `[phone · voice message]` they recorded and the laptop transcribed (may be misheard: read the key part back before anything destructive), `[phone · shared]` files they shared. Answer it with `handsfree text "…"`, not only in your chat or editor: they won't see the screen. Keep the text short; put detail in the chat as usual.
@@ -28,7 +30,7 @@ Ring only when it is worth interrupting them: a long job they are waiting on fin
 
 To show the user a picture, a recording, a document or any other file, run `handsfree send FILE [FILE ...] "a few words"`. On a call it appears in the chat; otherwise it arrives as a notification. In Henchline, pictures and audio open in the app, and other files are saved to the phone's Downloads/Henchline. Send only what they would want to see on their phone, not routine output.
 
-"Show me" (or any ask to see what you see): run `handsfree show "a few words"`. It sends a picture of the terminal pane you run in (drawn from tmux's own text) into the call's chat; `handsfree show --screen` sends the whole screen instead, for a page, a window or an agent not in tmux. A photo the user takes with the call screen's camera button arrives with their next turn, as a line "(With this the user took a photo with their phone's camera: PATH …)": open that file and look at it; if no turn follows within 45 s it arrives alone as a `[phone · shared]` message.
+"Show me" (or any ask to see what you see): run `handsfree show "a few words"`. It sends a picture of the terminal pane you run in (drawn from tmux's own text, so a locked screen is fine). `handsfree show --window 0xID` sends that window's own picture, also without unlocking. `handsfree show --screen` sends the whole screen; while locked, that is the lock screen. A photo the user takes with the call screen's camera button arrives with their next turn, as a line "(With this the user took a photo with their phone's camera: PATH …)": open that file and look at it; if no turn follows within 45 s it arrives alone as a `[phone · shared]` message.
 
 Files the user shares from their phone arrive as a message tagged `[phone · shared]`, giving the path on the laptop (under `~/Downloads/Henchline/<date>/`), the type and size, and anything they wrote. Open those files and work with them as you would with any file they give you.
 

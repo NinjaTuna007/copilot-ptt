@@ -40,7 +40,7 @@ from sklearn.preprocessing import StandardScaler
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))  # voice/
-from voice.state import JARVIS_PERSONAL, KOKORO_MODELS as KOKORO, WAKE_MODEL, WAKE_SAMPLES  # noqa: E402
+from voice.state import HANDSFREE_DATA, JARVIS_PERSONAL, KOKORO_MODELS as KOKORO, WAKE_MODEL, WAKE_SAMPLES  # noqa: E402
 
 RATE = 16000
 WIN = 2 * RATE  # 2 s of audio gives the 16 embedding frames a detector sees
@@ -62,6 +62,8 @@ NEAR_MISSES = {  # per word: what sounds closest without being it
     "claude": [],
     "jarvis": ["Hey Travis, how are you doing?", "The jar is on the top shelf.", "Harvest season starts soon.",
                "Hey Davis, come over here.", "Hey, service was really slow today.", "Charlie is coming over."],
+    "henchline": ["The bench line is straight.", "Hinge line.", "Attention, please.", "The hens lined up."],
+    "papoy": ["The paper is on the desk.", "Poppy, come here.", "A boy and a toy.", "Tap, oy."],
 }
 
 
@@ -84,13 +86,18 @@ def is_word(heard: str, word: str) -> bool:
 
 
 def hey_word_spans(model, path: str, word: str) -> list[tuple[int, int]]:
-    """Sample indices where each wake word (after "hey") starts and ends."""
+    """Sample indices where the wake word starts and ends. "hey" in front is optional. Two words that together
+    are the wake word ("hench" "line") count as one span."""
     segments, _ = model.transcribe(path, language="en", beam_size=1, word_timestamps=True)
     words = [w for s in segments for w in s.words]
     spans = []
-    for prev, heard in zip(words, words[1:]):
-        if is_word(heard.word, word) and re.sub(r"\W", "", prev.word).lower() == "hey":
+    for i, heard in enumerate(words):
+        nxt = words[i + 1] if i + 1 < len(words) else None
+        pair = re.sub(r"\W", "", heard.word + (nxt.word if nxt else ""))
+        if is_word(heard.word, word):
             spans.append((int(heard.start * RATE), int(heard.end * RATE)))
+        elif nxt and is_word(pair, word):
+            spans.append((int(heard.start * RATE), int(nxt.end * RATE)))
     return spans
 
 
@@ -113,7 +120,12 @@ def main() -> int:
 
     options = dict(zip(sys.argv[1::2], sys.argv[2::2]))
     word, finder = options.get("--word", "claude").lower(), options.get("--finder", "small")
-    samples, out = (WAKE_SAMPLES, WAKE_MODEL) if word == "claude" else (WAKE_SAMPLES / word, JARVIS_PERSONAL)
+    if word == "claude":
+        samples, out = WAKE_SAMPLES, WAKE_MODEL
+    elif word == "jarvis":
+        samples, out = WAKE_SAMPLES / word, JARVIS_PERSONAL
+    else:
+        samples, out = WAKE_SAMPLES / word, HANDSFREE_DATA / f"hey_{word}_personal.pkl"
     # The other wake words' takes are negatives: same voice and rooms, and the nearest thing to a confusion.
     # For "claude" that is every word folder under samples/, any future one included
     others = sorted(glob.glob(str(WAKE_SAMPLES / ("*.wav" if word != "claude" else "*/*.wav"))))
@@ -155,7 +167,7 @@ def main() -> int:
                     clip = window(audio, start + int((end - start) * part)) * gain
                     neg.setdefault(spot, []).append(clip)
                     cut.setdefault(spot, []).append(clip)
-        print(f"{Path(path).name}: {len(ends)} hey {word.capitalize()}", flush=True)
+        print(f"{Path(path).name}: {len(ends)} {word}", flush=True)
         if spot != "negative" and len(ends) < 2:  # asked for twice: an unfound one would be taught as "not it"
             continue
         for end in range(WIN, len(audio), RATE // 4):  # every 0.25 s, away from any wake word

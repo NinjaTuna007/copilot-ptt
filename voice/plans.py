@@ -14,13 +14,19 @@ from pathlib import Path
 STATUSES = {"pending", "in_progress", "completed"}
 
 
+def _split(text: str) -> tuple[str, str]:
+    """The header and the body. A comment before the header (some plan files start with one) is not part of either."""
+    rest = re.sub(r"^(?:<!--.*?-->\s*)+", "", text.lstrip(), count=1, flags=re.S)
+    if rest.startswith("---"):
+        end = rest.find("\n---", 3)
+        if end != -1:
+            return rest[4:end], rest[end + 4:]
+    return "", text
+
+
 def parse(text: str) -> dict:
     """The plan's name, overview, and steps. The mermaid stays in the body; the phone lists the steps."""
-    front, body = "", text
-    if text.startswith("---"):
-        end = text.find("\n---", 3)
-        if end != -1:
-            front, body = text[4:end], text[end + 4:]
+    front, body = _split(text)
     name = _field(front, "name")
     overview = _field(front, "overview")
     todos, current = [], None
@@ -93,11 +99,33 @@ def html(markdown: str) -> str:
     return "".join(out)
 
 
+def _diagram(code: str) -> dict:
+    """A mermaid diagram as boxes in the order they appear, so the phone can draw them. Labels win over bare ids."""
+    labels: dict[str, str] = {}
+    for found in re.finditer(r"(\w+)\s*[\[({]\"?([^\]}\)\"]+?)\"?\s*[\])}]", code):
+        if found.group(1) not in ("flowchart", "graph", "subgraph"):
+            labels[found.group(1)] = found.group(2).strip()
+    order: list[str] = []
+
+    def add(name: str) -> None:
+        name = name.strip()
+        if name and name not in order and name not in ("flowchart", "graph", "subgraph", "end"):
+            order.append(name)
+
+    node = r"(\w+)(?:\[[^\]]*\]|\([^)]*\)|\{[^}]*\})?"
+    arrow = r"(?:<-->|-{1,2}\.?->{1,2})"
+    for found in re.finditer(rf"{node}\s*{arrow}\s*(?:\|[^|\n]*\|\s*)?{node}", code):
+        add(labels.get(found.group(1), found.group(1)))
+        add(labels.get(found.group(2), found.group(2)))
+    return {"t": "diagram", "kind": "mermaid", "nodes": order[:16]}
+
+
 def _inline(text: str) -> str:
     """One line's Markdown as the small HTML a phone's text view shows: code first (kept literal), then bold,
-    italics and links. Everything escaped before any tag goes in."""
+    italics and links. A link is its name. Everything escaped before any tag goes in."""
     import html as escape
 
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
     text = escape.escape(text)
     spans: list[str] = []
     text = re.sub(r"`([^`]+)`", lambda m: spans.append(m.group(1)) or f"\x00{len(spans) - 1}\x00", text)
@@ -133,8 +161,7 @@ def blocks(markdown: str, title: str = "") -> list[dict]:
                 i += 1
             i += 1
             if lang == "mermaid":
-                nodes = re.findall(r"[\[(\{]\s*\"?([^\]\)\}\"]{2,40})\"?\s*[\])\}]", "\n".join(code))
-                out.append({"t": "diagram", "kind": "mermaid", "nodes": list(dict.fromkeys(n.strip() for n in nodes))[:6]})
+                out.append(_diagram("\n".join(code)))
             else:
                 out.append({"t": "code", "lang": lang, "text": "\n".join(code)[:6000]})
             continue
@@ -182,6 +209,73 @@ def blocks(markdown: str, title: str = "") -> list[dict]:
     return out[:400]
 
 
+_PLAN_URI = re.compile(rb'"planUri"\s*:\s*"(file://[^"\\]+\.plan\.md)"')
+_plan_cache: dict[str, tuple[str, str]] = {}  # store path -> (latest blob, plan path)
+
+
+def _plan_from_store(store: Path) -> Path | None:
+    """The plan this Cursor chat last created, from its own store (`planUri` on the plan tool's result)."""
+    import contextlib
+    import sqlite3
+
+    try:
+        with contextlib.closing(sqlite3.connect(f"file:{store}?mode=ro", uri=True, timeout=1)) as db:
+            row = db.execute("select value from meta where key = '0'").fetchone()
+            if not row:
+                return None
+            raw = row[0]
+            if isinstance(raw, str) and re.fullmatch(r"[0-9a-f]+", raw):
+                raw = bytes.fromhex(raw).decode()
+            elif isinstance(raw, bytes):
+                raw = raw.decode()
+            root_id = str(__import__("json").loads(raw).get("latestRootBlobId") or "")
+            cached = _plan_cache.get(str(store))
+            if cached and cached[0] == root_id and Path(cached[1]).is_file():
+                return Path(cached[1])
+            blobs = {bid: data for bid, data in db.execute("select id, data from blobs")
+                     if isinstance(data, (bytes, bytearray))}
+            root = blobs.get(root_id)
+            if not root:
+                return None
+            seen: set[str] = set()
+            children: list[str] = []
+            for i in range(len(root) - 32):
+                child = root[i:i + 32].hex()
+                if child in blobs and child not in seen:
+                    seen.add(child)
+                    children.append(child)
+            owners: dict[str, str] = {}
+            for bid, blob in blobs.items():
+                if b'"planUri"' not in blob:
+                    continue
+                found = _PLAN_URI.search(blob)
+                if found:
+                    owners[bid] = found.group(1).decode()
+            needles = [(bytes.fromhex(bid), uri) for bid, uri in owners.items()]
+            last = ""
+            for child in children:
+                if child in owners:
+                    last = owners[child]
+                blob = blobs.get(child, b"")
+                for needle, uri in needles:
+                    if needle in blob:
+                        last = uri
+            if not last:
+                return None
+            path = Path(urllib.parse.unquote(last.removeprefix("file://")))
+    except (OSError, sqlite3.Error, ValueError):
+        return None
+    if not path.is_file():
+        return None
+    _plan_cache[str(store)] = (root_id, str(path))
+    return path
+
+
+def _cursor_store(home: Path, key: str) -> Path | None:
+    found = list((home / ".cursor/chats").glob(f"*/{key}/store.db"))
+    return found[0] if len(found) == 1 else None
+
+
 def for_session(session: str, home: Path | None = None) -> Path | None:
     """The plan file that chat itself wrote or opened, from the agent's own records (never guessed by name):
     Claude logs planFilePath in its session log; Cursor links an editor chat to its plan in its store. (A
@@ -209,6 +303,16 @@ def for_session(session: str, home: Path | None = None) -> Path | None:
         return None
     if not session.startswith("cursor-") or not re.fullmatch(r"[0-9a-f-]{36}", key):
         return None
+    # This chat's store records the plan it created (planUri). That is the plan it is on, not the newest
+    # file in the folder and not whichever file happens to mention the project.
+    store = _cursor_store(home, key)
+    if store is not None:
+        current = _plan_from_store(store)
+        if current is not None:
+            return current
+    current = _for_chat(home, key)
+    if current is not None:
+        return current
     try:
         store = home / ".config/Cursor/User/globalStorage/state.vscdb"
         with contextlib.closing(sqlite3.connect(f"file:{store}?mode=ro", uri=True, timeout=1)) as db:
@@ -220,6 +324,25 @@ def for_session(session: str, home: Path | None = None) -> Path | None:
     except sqlite3.Error:
         pass
     return None
+
+
+def _for_chat(home: Path, key: str) -> Path | None:
+    """The newest plan file that names this chat in its opening comment."""
+    folder = home / ".cursor/plans"
+    if not folder.is_dir():
+        return None
+    mark = f"<!-- {key}"
+    found = []
+    for path in folder.glob("*.plan.md"):
+        try:
+            head = path.read_text(errors="replace")[:80]
+        except OSError:
+            continue
+        if head.lstrip().startswith(mark):
+            found.append(path)
+    if not found:
+        return None
+    return max(found, key=lambda path: path.stat().st_mtime)
 
 
 def of_session(session: str, project: Path | None) -> dict | None:

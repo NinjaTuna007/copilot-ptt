@@ -60,6 +60,8 @@ CALL_CHECK = STATE / "call.check"  # the next call starts on check-on-me (a wake
 # Away (the user's wish, 2026-11-17): on another call, or with other people. Hands-free stops listening and talkback
 # texts the phone instead of speaking at the laptop; push-to-talk works as ever. A call ends it
 AWAY = STATE / "away"
+VOICE_CHOICE = STATE / "voices.json"  # how the agents sound: each its own, one voice, or a surprise pick
+CLAUDE_MODE = STATE / "claude-mode"  # a plan-chip press, until Claude's own log catches up
 CALL_SILENT = STATE / "call.no-audio"  # the phone's mic stopped arriving mid-call (a dropped line): talkback waits
 CALL_RING = STATE / "call.ring-endpoint"  # where Henchline can be rung (its UnifiedPush address): private, never logged
 CALL_RINGER = STATE / "call.ringer"  # who rang the user last (session, when): the call server routes the answer there

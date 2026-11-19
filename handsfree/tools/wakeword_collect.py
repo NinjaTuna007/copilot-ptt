@@ -34,9 +34,12 @@ from sensing import RATE  # noqa: E402
 from voice.state import EC_SOURCE, HANDSFREE_DATA, JARVIS_MODEL, PAUSE, WAKE_SAMPLES  # noqa: E402
 
 THRESHOLD = 0.5
-# The published model each word is scored with while recording, and where its takes go
+# The published model each word is scored with while recording, and where its takes go. None: no published
+# model (henchline). The take is kept anyway; the trainer finds the word in it.
 WORDS = {"claude": (HANDSFREE_DATA / "hey_claude.onnx", WAKE_SAMPLES),
-         "jarvis": (JARVIS_MODEL, WAKE_SAMPLES / "jarvis")}
+         "jarvis": (JARVIS_MODEL, WAKE_SAMPLES / "jarvis"),
+         "henchline": (None, WAKE_SAMPLES / "henchline"),
+         "papoy": (None, WAKE_SAMPLES / "papoy")}
 POSITIONS = [
     ("desk", "at your desk, facing me"),
     ("dining", "at the dining table next to me"),
@@ -91,8 +94,8 @@ def main() -> int:
     published, folder = WORDS[word]
     wanted = set(args)
     positions = [p for p in POSITIONS if not wanted or p[0] in wanted]
-    model = Model(wakeword_models=[str(published)], inference_framework="onnx")
-    phrase = f"hey {word.capitalize()}"
+    model = Model(wakeword_models=[str(published)], inference_framework="onnx") if published else None
+    phrase = word if word in ("henchline", "papoy") else f"hey {word.capitalize()}"
     PAUSE.touch()
     results = []
     try:
@@ -117,6 +120,10 @@ def main() -> int:
                 subprocess.run(["pw-play", CHIME])
                 audio = record(6)
                 save(folder, name, audio)
+                if model is None:  # no published model: keep the take; the trainer finds the word
+                    print(f"{name}: saved", flush=True)
+                    say("Saved.")
+                    break
                 count, best = wakes(model, audio)
                 results.append((name, attempt, count, best))
                 print(f"{name} try {attempt + 1}: woke {count}x, best {best:.2f}", flush=True)
@@ -130,6 +137,10 @@ def main() -> int:
         subprocess.run(["pw-play", CHIME])
         audio = record(10)
         save(folder, "negative", audio)
+        if model is None:
+            print("negative: saved", flush=True)
+            say("That's all, thank you.")
+            return 0
         count, best = wakes(model, audio)
         print(f"negative: woke {count}x, best {best:.2f}", flush=True)
         say("No false wakes. That's all, thank you." if not count

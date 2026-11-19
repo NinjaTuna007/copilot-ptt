@@ -7,9 +7,13 @@ an editor whose rows are the catalog's parameters. A pick on the phone is driven
 
 from __future__ import annotations
 
+import contextlib
+import json
 import os
 import re
+import sqlite3
 import time
+from pathlib import Path
 
 # The CLI treats a line as a slash command when it is `/word…` or when whitespace, a slash and a word run to the
 # end. That opens a picker and the rest of the line is the filter, so the words never arrive as a message.
@@ -19,18 +23,38 @@ SLASH = re.compile(r"^(?P<pre>[\s\S]*?)(?P<gap>\s+)/((?:[\w-]+(?:\s+.*)?)?)$")
 ROW = re.compile(r"^\s*(→)?\s*([○●◯◉])\s+(.+?)\s*(✓)?\s*$")
 OPEN = ("Edit Parameters", "Tab to modify", "Filter:")
 STEP = 0.25  # the editor drops keys that arrive together
+# The CLI lists Auto as the slug "auto". Cursor's catalog calls that same model "default".
+ALIASES = {"auto": "default"}
 
 
 def menu(catalog: list[dict], slugs: list[str]) -> list[dict]:
     """Catalog models the CLI actually lists. A slug belongs to the longest catalog id it extends
-    (`composer-2.5-fast` is its own model when that id exists, not the fast switch of `composer-2.5`)."""
+    (`composer-2.5-fast` is its own model when that id exists, not the fast switch of `composer-2.5`).
+    "auto" is the catalog's Auto."""
     ids = [m["id"] for m in catalog if m.get("id")]
     used = set()
     for slug in slugs:
+        slug = ALIASES.get(slug, slug)
         hits = [i for i in ids if slug == i or slug.startswith(i + "-")]
         if hits:
             used.add(max(hits, key=len))
     return [m for m in catalog if m["id"] in used]
+
+
+def cli_slug(model_id: str) -> str:
+    """The slug `/model` filters on. Auto's catalog id is "default"; the CLI spells it "auto"."""
+    for slug, catalog_id in ALIASES.items():
+        if catalog_id == model_id:
+            return slug
+    return model_id
+
+
+def on_model(chat: str, model_id: str) -> bool:
+    """The chat's own record is this model. Auto is stored as "default" or "auto"."""
+    got = saved(chat).get("model") or ""
+    if model_id == "default":
+        return got in ("default", "auto")
+    return got == model_id
 
 
 def reading(status: str, models: list[dict]) -> dict:
@@ -55,6 +79,67 @@ def reading(status: str, models: list[dict]) -> dict:
         if values:
             params[param["id"]] = max(values, key=lambda v: len(v["name"]))["value"]
     return {"model": entry["id"], "params": params}
+
+
+def _store_meta(chat: str) -> dict:
+    """The CLI chat's own meta row. {} when that store isn't there or can't be read."""
+    if not re.fullmatch(r"[0-9a-f-]{36}", chat):
+        return {}
+    stores = list((Path.home() / ".cursor/chats").glob(f"*/{chat}/store.db"))
+    if len(stores) != 1:
+        return {}
+    try:
+        with contextlib.closing(sqlite3.connect(f"file:{stores[0]}?mode=ro", uri=True, timeout=1)) as db:
+            row = db.execute("select value from meta where key = '0'").fetchone()
+        raw = row[0] if row else ""
+        if isinstance(raw, bytes):
+            raw = raw.decode()
+        text = bytes.fromhex(raw).decode() if isinstance(raw, str) and re.fullmatch(r"[0-9a-f]+", raw) else str(raw)
+        meta = json.loads(text) if text else {}
+    except (OSError, sqlite3.Error, ValueError, UnicodeError):
+        return {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _pairs(raw) -> dict:
+    if not isinstance(raw, list):
+        return {}
+    return {str(item["id"]): str(item["value"]) for item in raw
+            if isinstance(item, dict) and item.get("id") is not None and item.get("value") is not None}
+
+
+def saved(chat: str) -> dict:
+    """What this CLI chat is on, from its own records: {"model", "params"}. The store keeps the model id.
+    Context, effort and fast are the CLI config's selected model when that is this one, else the parameters
+    it last saved for that model. A Konsole tab has no screen to read, and this does not need one."""
+    model = str(_store_meta(chat).get("lastUsedModel") or "")
+    if not model:
+        return {"model": "", "params": {}}
+    try:
+        cfg = json.loads((Path.home() / ".cursor/cli-config.json").read_text())
+    except (OSError, ValueError, UnicodeError):
+        return {"model": model, "params": {}}
+    selected = cfg.get("selectedModel") if isinstance(cfg.get("selectedModel"), dict) else {}
+    params = _pairs(selected.get("parameters")) if selected.get("modelId") == model else {}
+    if not params:
+        table = cfg.get("modelParameters") if isinstance(cfg.get("modelParameters"), dict) else {}
+        params = _pairs(table.get(model))
+    return {"model": model, "params": params}
+
+
+def described(entry: dict | None, params: dict) -> str:
+    """The model, its effort, its context and fast, the way the chip says them."""
+    name = str((entry or {}).get("name") or "")
+    effort = context = fast = ""
+    for param in (entry or {}).get("params") or []:
+        value = params.get(param.get("id", ""))
+        if param.get("id") in ("reasoning_effort", "reasoning", "effort"):
+            effort = next((v["name"] for v in param.get("values") or [] if v.get("value") == value), "")
+        elif param.get("id") == "context" and value:
+            context = str(value).upper()
+        elif param.get("id") == "fast" and value == "true":
+            fast = "fast"
+    return " · ".join(part for part in (name, effort, context, fast) if part)
 
 
 def disarm(text: str) -> str:
@@ -93,6 +178,61 @@ def valid(entry: dict, picked: dict) -> bool:
     """Every parameter the model has, each one a value it offers."""
     allowed = {p["id"]: {v["value"] for v in p.get("values") or []} for p in entry.get("params") or []}
     return set(picked) == set(allowed) and all(v in allowed[k] for k, v in picked.items())
+
+
+def editor_screen(entry: dict, current: dict) -> list[str]:
+    """The CLI's parameter editor as it is drawn: catalog order, the arrow on the first choice, current values
+    marked on. Konsole has no screen to read, and this is the same layout the tmux path reads."""
+    lines = [f" {entry.get('name', '')} — Edit Parameters"]
+    first = True
+    for param in entry.get("params") or []:
+        if param.get("kind") == "bool":
+            on = current.get(param.get("id", "")) == "true"
+            mark = "◉" if on else "◯"
+            arrow = "→ " if first else "  "
+            lines.append(f" {arrow}{mark} {param.get('name', '')}")
+            first = False
+            continue
+        lines.append(f"  {param.get('name', '')}")
+        for value in param.get("values") or []:
+            on = current.get(param.get("id", "")) == value.get("value")
+            mark = "●" if on else "○"
+            tick = " ✓" if on else ""
+            arrow = "→ " if first else "  "
+            lines.append(f" {arrow}{mark} {value.get('name', '')}{tick}")
+            first = False
+    return lines
+
+
+def remembered(model_id: str) -> dict:
+    """The parameters the CLI last saved for this model, from its own config."""
+    try:
+        cfg = json.loads((Path.home() / ".cursor/cli-config.json").read_text())
+    except (OSError, ValueError, UnicodeError):
+        return {}
+    selected = cfg.get("selectedModel") if isinstance(cfg.get("selectedModel"), dict) else {}
+    if selected.get("modelId") in (model_id, cli_slug(model_id)):
+        found = _pairs(selected.get("parameters"))
+        if found:
+            return found
+    table = cfg.get("modelParameters") if isinstance(cfg.get("modelParameters"), dict) else {}
+    raw = table.get(model_id)
+    if not isinstance(raw, list):
+        raw = table.get(cli_slug(model_id))
+    return _pairs(raw)
+
+
+def agreed(model_id: str, wanted: dict) -> bool:
+    """The CLI's selected model is this one, with these parameters."""
+    try:
+        cfg = json.loads((Path.home() / ".cursor/cli-config.json").read_text())
+    except (OSError, ValueError, UnicodeError):
+        return False
+    selected = cfg.get("selectedModel") if isinstance(cfg.get("selectedModel"), dict) else {}
+    if selected.get("modelId") not in (model_id, cli_slug(model_id)):
+        return False
+    got = _pairs(selected.get("parameters"))
+    return all(got.get(key) == value for key, value in wanted.items())
 
 
 def _rows(lines: list[str]) -> list[dict]:
@@ -257,3 +397,86 @@ def apply(address: str, entry: dict, wanted: dict) -> str:
             return ""
         time.sleep(0.4)
     return "Switched, but I couldn't read what Cursor is on now." if not status else f"Switched, but Cursor shows {status}."
+
+
+# What a Konsole pty receives for those keys while the CLI's editor has asked for application cursor keys.
+_KONSOLE_KEYS = {"Down": "\x1bOB", "Up": "\x1bOA", "Tab": "\t", "Enter": "\r", "Escape": "\x1b", "C-u": "\x15"}
+
+
+def apply_tab(tab, entry: dict, wanted: dict, chat: str = "") -> str:
+    """Drive the model editor in tmux, where the screen can be read, or in Konsole, where it cannot.
+    `chat` is the CLI chat id, so a Konsole switch is only called done when that chat's own record moves."""
+    from voice.desktop import tmux
+    if not tab:
+        return "That agent isn't running."
+    if tab.owner == tmux.OWNER:
+        return apply(tab.address, entry, wanted)
+    if str(tab.address).startswith("/Sessions/"):
+        return apply_konsole(tab, entry, wanted, chat)
+    return "That Cursor chat isn't in a terminal whose model editor I can drive."
+
+
+def longer_model(entry: dict, catalog: list[dict]) -> str:
+    """A catalog id that extends this one (`composer-2.5-fast` extends `composer-2.5`). Tab on the first filter
+    row would edit that longer model. "" when this id is not a prefix of another."""
+    prefix = entry.get("id", "") + "-"
+    return next((str(m.get("name") or m.get("id")) for m in catalog
+                 if str(m.get("id", "")).startswith(prefix)), "")
+
+
+def apply_konsole(tab, entry: dict, wanted: dict, chat: str = "") -> str:
+    """The same key sequence as tmux, typed into the Konsole session. Checked against the CLI's own config,
+    because Konsole does not give the screen back. Refuses when another listed model id extends this one: the
+    filter can land on that longer row, and Tab would edit it."""
+    from voice.desktop.cursor_bridge import catalog
+    from voice.desktop.kde_x11 import qdbus_ok
+
+    longer = longer_model(entry, catalog())
+    if longer:
+        return f"Cursor also lists {longer}, and this terminal can't show which row is highlighted, so I didn't switch."
+
+    def text(body: str) -> bool:
+        return qdbus_ok(tab.owner, tab.address, "sendText", body)
+
+    def press(key: str) -> bool:
+        seq = _KONSOLE_KEYS.get(key)
+        return bool(seq) and text(seq)
+
+    def shut() -> None:
+        for _ in range(3):
+            press("Escape")
+            time.sleep(STEP)
+
+    if not text(f"/model {cli_slug(entry['id'])}"):
+        return "Couldn't type into it."
+    time.sleep(0.8)
+    if not press("Tab"):
+        shut()
+        return "Couldn't open the model editor."
+    time.sleep(0.5)
+    keys, why = plan(editor_screen(entry, remembered(entry["id"])), entry, wanted)
+    if why:
+        shut()
+        return why
+    if not keys:
+        keys = ["Enter"]
+    for key in keys:
+        if not press(key):
+            shut()
+            return "Couldn't set that in the model editor."
+        time.sleep(STEP)
+    deadline = time.monotonic() + 4
+    while time.monotonic() < deadline:
+        # The global default moves as soon as the editor is touched. The chat's own record is the one the pill shows.
+        if agreed(entry["id"], wanted) and (not chat or on_model(chat, entry["id"])):
+            press("Escape")  # the editor is still up; Escape leaves the switch in place
+            return ""
+        time.sleep(0.4)
+    shut()
+    still = saved(chat).get("model") if chat else ""
+    if still in ("default", "auto"):
+        still = "Auto"
+    if still and still not in (entry["id"], cli_slug(entry["id"]), entry.get("name")):
+        return (f"This chat is still on {still}. Cursor's default for a new chat moved, "
+                "and this one did not.")
+    return f"Cursor didn't switch to {entry.get('name', entry['id'])}."

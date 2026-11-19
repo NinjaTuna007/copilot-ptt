@@ -9,6 +9,7 @@ import secrets
 import shutil
 import subprocess
 import time
+import urllib.request
 from pathlib import Path
 
 FONTS = ("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", "/usr/share/fonts/dejavu-sans-mono-fonts/DejaVuSansMono.ttf",
@@ -123,7 +124,7 @@ def pane_text(pane: str) -> str | None:
 
 
 def screen(path: Path) -> Path | None:
-    """The whole screen, as the desktop's own tool takes it."""
+    """The whole screen, as the desktop's own tool takes it. While the screen is locked this is the lock screen."""
     if shutil.which("spectacle"):
         cmd = ["spectacle", "-b", "-n", "-f", "-o", str(path)]
     elif shutil.which("import"):
@@ -132,6 +133,48 @@ def screen(path: Path) -> Path | None:
         return None
     try:
         subprocess.run(cmd, capture_output=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return path if path.is_file() and path.stat().st_size > 0 else None
+
+
+_SKIP = ("plasmashell", "kwin", "ksmserver", "krunner", "spectacle", "kscreenlocker")
+
+
+def windows() -> list[dict]:
+    """Windows that can be pictured by id, without raising them: [{id, app, title}]. The desktop and the lock
+    screen are left out. Reading a window by id does not need the screen unlocked."""
+    from voice.desktop import x11
+
+    found = []
+    for wid in x11.windows():
+        cls = x11.window_class(wid)
+        if any(skip in cls for skip in _SKIP):
+            continue
+        names = re.findall(r'"([^"]+)"', cls)
+        app = (names[-1] if names else "").strip()
+        title = " ".join(x11.window_title(wid).split())
+        if not app and not title:
+            continue
+        found.append({"id": wid, "app": app[:40], "title": title[:140]})
+    return found
+
+
+def matching(found: list[dict], query: str) -> list[dict]:
+    """Windows whose app or title contains the query."""
+    needle = query.strip().lower()
+    if not needle:
+        return []
+    return [item for item in found if needle in item["app"].lower() or needle in item["title"].lower()]
+
+
+def window(wid: str, path: Path) -> Path | None:
+    """That window's own picture, by its id, without raising it or pressing a key. Works while the screen is
+    locked: the pixels are the window's, not whatever is painted over the desktop."""
+    if not re.fullmatch(r"0x[0-9a-fA-F]+", wid) or not shutil.which("import"):
+        return None
+    try:
+        subprocess.run(["import", "-window", wid, str(path)], capture_output=True, timeout=15)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return path if path.is_file() and path.stat().st_size > 0 else None
@@ -150,3 +193,45 @@ def folder() -> Path:
 
 def name() -> str:
     return time.strftime("show-%H%M%S-") + secrets.token_hex(2) + ".png"
+
+
+def announce(of: str) -> None:
+    """The phone is told a picture of a window or the whole screen was taken. Any trusted caller can ask for one,
+    so it must not happen unseen. The topic is never printed."""
+    title = "A picture was taken"
+    try:
+        topic_file = Path.home() / ".config/ptt/ntfy-topic"
+        topic = topic_file.read_text().strip() if topic_file.exists() else ""
+        if not topic:
+            return
+        urllib.request.urlopen(urllib.request.Request(
+            f"https://ntfy.sh/{topic}", data=f"A picture of {of} was taken.".encode(),
+            headers={"Title": title.encode("ascii", "replace").decode(), "Tags": "lock"}), timeout=10).close()
+    except (OSError, UnicodeError, ValueError):
+        from voice.state import HANDSFREE_LOG, log
+        log(HANDSFREE_LOG, f"phone notice not sent: {title}")
+
+
+def take(kind: str, wid: str = "", pane: str = "", of: str = "") -> tuple[Path | None, str]:
+    """A picture for the phone: the terminal pane (drawn, so a locked screen is fine), one window by id (its own
+    pixels, not the lock screen painted over it), or the whole screen. A window or the whole screen is also told
+    to the phone."""
+    path = folder() / name()
+    if kind == "screen":
+        got = screen(path)
+        if got:
+            announce(of or "the whole screen")
+        return (got, "") if got else (None, "Couldn't take the screen.")
+    if kind == "window":
+        got = window(wid, path)
+        if got:
+            announce(of or "a window")
+        return (got, "") if got else (None, "Couldn't take that window.")
+    text = pane_text(pane) if pane else None
+    if text is None:
+        return None, "This agent has no terminal to draw."
+    try:
+        draw(text, path)
+    except (ImportError, OSError):
+        return None, "Couldn't draw the terminal."
+    return path, ""

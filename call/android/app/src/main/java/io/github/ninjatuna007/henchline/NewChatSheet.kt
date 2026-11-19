@@ -104,6 +104,18 @@ class DragSheet(context: android.content.Context, private val onDismiss: () -> U
 }
 
 open class BottomPanel(protected val activity: Activity) {
+    companion object {
+        private val shown = ArrayDeque<BottomPanel>()  // open sheets, the newest last: back closes that one
+
+        /** The sheet on top, or null when none is open. */
+        fun top(): BottomPanel? = shown.lastOrNull { it.isOpen }
+
+        /** Every open sheet, the top one first: leaving a screen must not leave one drawn over the next. */
+        fun closeAll() {
+            while (shown.isNotEmpty()) shown.last().close(animate = false)
+        }
+    }
+
     protected val dp = activity.resources.displayMetrics.density
     protected fun px(v: Int) = (v * dp).toInt()
     protected fun colour(id: Int) = activity.getColor(id)
@@ -164,6 +176,7 @@ open class BottomPanel(protected val activity: Activity) {
             override fun onViewDetachedFromWindow(v: View) { decor.viewTreeObserver.removeOnGlobalLayoutListener(lift) }
         })
         activity.addContentView(root, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        shown.addLast(this)  // above any sheet already open: back closes this one first
         root.animate().alpha(1f).setDuration(180).start()
         sheet.translationY = 800 * dp
         sheet.animate().translationY(0f).setDuration(300).setInterpolator(DecelerateInterpolator(1.6f)).start()
@@ -173,6 +186,7 @@ open class BottomPanel(protected val activity: Activity) {
     }
 
     fun close(animate: Boolean = true) {
+        shown.remove(this)
         val r = root ?: return
         val s = sheet
         root = null; sheet = null
@@ -450,11 +464,18 @@ class ChatActionsSheet(
     private val onRemove: () -> Unit,
     private val onEnd: (done: (String?) -> Unit) -> Unit,
     private val onRename: ((String) -> Unit)? = null,  // the agent's own /rename, with the name typed here
+    private val pinned: Boolean = false,
+    private val onPin: ((Boolean) -> Unit)? = null,
 ) : BottomPanel(activity) {
     fun show() {
         val sheet = open(title, subtitle)
         val rows = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
         sheet.addView(rows, wide(16))
+        onPin?.let { pin ->
+            rows.addView(row(if (pinned) "📌" else "📌", if (pinned) "Unpin chat" else "Pin chat",
+                if (pinned) "It goes back with the others" else "Stays at the top of the list",
+                R.color.text) { pin(!pinned); close() })
+        }
         if (!gone) onRename?.let { rename -> rows.addView(row("✏️", "Rename chat", "As /rename does: the agent's own name for it",
                 R.color.text) { askName(rows, rename) }) }
         if (!gone) rows.addView(row("🧹", "Clear chat", "On this phone only: the agent keeps its conversation", R.color.text) {
@@ -1125,6 +1146,116 @@ class YouSheet(
         }, LinearLayout.LayoutParams(0, px(38), 1f))
         sheet.addView(track, wide(16))
         sheet.addView(actionRow("⚙", "Settings", "Calls, chats, your laptop", R.color.text) { close(); onSettings() }, wide(14))
+        sheet.addView(quiet("Close") { close() }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT).apply { gravity = Gravity.END; topMargin = px(8) })
+    }
+}
+
+/** How the agents sound (the user's wish, 2026-11-17): each its own, one voice, or a surprise that stays. */
+class VoicesSheet(
+    activity: Activity,
+    private var setup: JSONObject,
+    private val save: (JSONObject, (JSONObject) -> Unit) -> Unit,
+    private val preview: (String) -> Unit,
+) : BottomPanel(activity) {
+    private val agents = listOf("claude" to "Claude", "cursor" to "Cursor", "codex" to "Codex")
+
+    fun show() {
+        val sheet = open("Voices", "How the agents sound")
+        val body = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
+        draw(body)
+        sheet.addView(ScrollView(activity).apply { isVerticalScrollBarEnabled = false; addView(body) }, wide(8))
+        sheet.addView(quiet("Close") { close() }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT).apply { gravity = Gravity.END; topMargin = px(8) })
+    }
+
+    private fun draw(body: LinearLayout) {
+        body.removeAllViews()
+        val mode = setup.optString("mode", "own")
+        val track = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = rounded(colour(R.color.surface), 20f); setPadding(px(3), px(3), px(3), px(3))
+        }
+        for ((id, label) in listOf("own" to "Each its own", "one" to "One voice", "surprise" to "Surprise me")) {
+            track.addView(TextView(activity).apply {
+                text = label; gravity = Gravity.CENTER; textSize = 12.5f
+                setTextColor(colour(if (id == mode) R.color.text else R.color.muted))
+                if (id == mode) background = rounded(colour(R.color.surface_high), 17f)
+                setOnClickListener {
+                    val change = JSONObject().put("mode", id)
+                    if (id == "surprise") change.put("again", true)
+                    save(change) { setup = it; draw(body) }
+                }
+            }, LinearLayout.LayoutParams(0, px(40), 1f))
+        }
+        body.addView(track, wide(4))
+        val showing = setup.optJSONObject("showing")
+        val choices = setup.optJSONArray("choices")
+        for ((id, name) in agents) {
+            val voice = showing?.optJSONObject(id)
+            val voiceId = voice?.optString("id").orEmpty()
+            val voiceName = voice?.optString("name").orEmpty().ifEmpty { voiceId }
+            body.addView(LinearLayout(activity).apply {
+                orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, px(10), 0, px(4))
+                addView(ImageView(activity).apply { setImageResource(MainActivity.avatarOf(id)) },
+                    LinearLayout.LayoutParams(px(40), px(40)))
+                addView(LinearLayout(activity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(TextView(activity).apply { text = name; setTextColor(colour(R.color.text)); textSize = 15f })
+                    addView(TextView(activity).apply {
+                        text = voiceName; setTextColor(colour(R.color.cyan)); textSize = 13f
+                        if (mode != "surprise" && choices != null) setOnClickListener {
+                            val next = nextVoice(choices, voiceId)
+                            val change = JSONObject().put("mode", mode).put("voice", next)
+                            if (mode == "own") change.put("agent", id)
+                            save(change) { setup = it; draw(body) }
+                        }
+                    })
+                }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { marginStart = px(12) })
+                addView(TextView(activity).apply {
+                    text = "▶"; textSize = 18f; setTextColor(colour(R.color.cyan)); setPadding(px(12), px(8), px(4), px(8))
+                    contentDescription = "Play $name"
+                    setOnClickListener { if (voiceId.isNotEmpty()) preview(voiceId) }
+                })
+            })
+        }
+    }
+
+    private fun nextVoice(choices: org.json.JSONArray, current: String): String {
+        val ids = (0 until choices.length()).map { choices.getJSONObject(it).optString("id") }.filter { it.isNotEmpty() }
+        if (ids.isEmpty()) return current
+        val at = ids.indexOf(current)
+        return ids[(at + 1) % ids.size]
+    }
+}
+
+/** /show: this terminal, the whole screen, or one window. A window is grabbed by its id, so a locked screen still shows it. */
+class ShowSheet(
+    activity: Activity,
+    private val windows: List<JSONObject>,
+    private val onPick: (String, String) -> Unit,
+) : BottomPanel(activity) {
+    fun show() {
+        val sheet = open("Show", "A picture into this chat")
+        val rows = LinearLayout(activity).apply { orientation = LinearLayout.VERTICAL }
+        rows.addView(actionRow("▭", "This terminal", "Drawn from the terminal, locked or not", R.color.cyan) {
+            close(); onPick("pane", "")
+        })
+        rows.addView(actionRow("▣", "The screen", "The whole screen. Locked, this is the lock screen", R.color.text) {
+            close(); onPick("screen", "")
+        }, wide(8))
+        if (windows.isEmpty()) rows.addView(TextView(activity).apply {
+            text = "No other windows."; textSize = 13f; setTextColor(colour(R.color.muted))
+        }, wide(12))
+        else {
+            rows.addView(label("WINDOWS"), wide(16))
+            for (window in windows) rows.addView(actionRow("▢", window.optString("app").ifEmpty { "Window" },
+                window.optString("title").ifEmpty { window.optString("id") }, R.color.text) {
+                close(); onPick("window", window.optString("id"))
+            })
+        }
+        sheet.addView(ScrollView(activity).apply { isVerticalScrollBarEnabled = false; addView(rows) }, wide(8))
         sheet.addView(quiet("Close") { close() }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
             ViewGroup.LayoutParams.WRAP_CONTENT).apply { gravity = Gravity.END; topMargin = px(8) })
     }

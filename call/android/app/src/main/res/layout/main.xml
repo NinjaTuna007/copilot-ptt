@@ -390,6 +390,16 @@
                 android:tint="#FFFFFF" />
         </LinearLayout>
 
+        <TextView
+            android:id="@+id/chatAway"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingHorizontal="16dp"
+            android:paddingBottom="6dp"
+            android:textColor="@color/muted"
+            android:textSize="13sp"
+            android:visibility="gone" />
+
         <LinearLayout
             android:id="@+id/planBar"
             android:layout_width="match_parent"
@@ -440,20 +450,26 @@
                     android:paddingBottom="8dp" />
             </ScrollView>
 
-            <ScrollView
-                android:id="@+id/planScroll"
+            <androidx.swiperefreshlayout.widget.SwipeRefreshLayout
+                android:id="@+id/planRefresh"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
-                android:paddingHorizontal="16dp"
                 android:visibility="gone">
 
-                <LinearLayout
-                    android:id="@+id/planList"
+                <ScrollView
+                    android:id="@+id/planScroll"
                     android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical"
-                    android:paddingBottom="24dp" />
-            </ScrollView>
+                    android:layout_height="match_parent"
+                    android:paddingHorizontal="16dp">
+
+                    <LinearLayout
+                        android:id="@+id/planList"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:paddingBottom="24dp" />
+                </ScrollView>
+            </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
 
             <View
                 android:layout_width="match_parent"
@@ -546,33 +562,26 @@
                 android:textColor="@color/text"
                 android:textColorHint="@color/muted" />
 
-            <!-- Below the words, as in the Claude app: attach, the agent's model (tap to switch), send or the mic -->
+            <!-- The model and plan sit on their own row. A long model name used to push Send off the screen
+                 once Stop appeared. -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:gravity="center_vertical"
-                android:orientation="horizontal">
-
-                <ImageButton
-                    android:id="@+id/attach"
-                    android:layout_width="44dp"
-                    android:layout_height="44dp"
-                    android:background="?android:attr/selectableItemBackgroundBorderless"
-                    android:contentDescription="Add a photo, a picture or files"
-                    android:enabled="false"
-                    android:src="@drawable/ic_add"
-                    android:tint="@color/text" />
+                android:gravity="start|center_vertical"
+                android:orientation="horizontal"
+                android:paddingStart="4dp"
+                android:paddingEnd="4dp"
+                android:paddingBottom="2dp">
 
                 <TextView
                     android:id="@+id/modelChip"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_marginStart="4dp"
+                    android:maxWidth="200dp"
                     android:background="@drawable/chip"
                     android:contentDescription="The agent's model: tap to switch"
                     android:ellipsize="end"
                     android:maxLines="1"
-                    android:maxWidth="180dp"
                     android:paddingHorizontal="14dp"
                     android:paddingVertical="8dp"
                     android:text="✦ Model"
@@ -592,13 +601,31 @@
                     android:textColor="@color/muted"
                     android:textSize="13sp"
                     android:visibility="gone" />
+            </LinearLayout>
+
+            <!-- Add, stop, and send stay on the row a thumb can reach. -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <ImageButton
+                    android:id="@+id/attach"
+                    android:layout_width="44dp"
+                    android:layout_height="44dp"
+                    android:background="?android:attr/selectableItemBackgroundBorderless"
+                    android:contentDescription="Add a photo, a picture or files"
+                    android:enabled="false"
+                    android:src="@drawable/ic_add"
+                    android:tint="@color/text" />
 
                 <View
                     android:layout_width="0dp"
                     android:layout_height="1dp"
                     android:layout_weight="1" />
 
-                <!-- While the agent works on what you sent: stop it, as Escape in its terminal (the Claude app's) -->
+                <!-- While the agent works on what you sent: stop it, as Escape in its terminal -->
                 <ImageButton
                     android:id="@+id/stop"
                     android:layout_width="44dp"
@@ -625,15 +652,20 @@
         </LinearLayout>
     </LinearLayout>
 
-    <!-- Settings: you, the sound, the laptop's address, Do Not Disturb -->
-    <LinearLayout
+    <!-- Settings: you, the sound, the laptop's address -->
+    <ScrollView
         android:id="@+id/settingsScreen"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:background="@color/navy"
-        android:orientation="vertical"
-        android:padding="16dp"
+        android:fillViewport="true"
         android:visibility="gone">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -802,5 +834,6 @@
                 android:textSize="16sp" />
         </LinearLayout>
     </LinearLayout>
+    </ScrollView>
 </FrameLayout>
 </LinearLayout>

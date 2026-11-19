@@ -22,6 +22,7 @@ from pathlib import Path
 
 from voice import spool
 from voice.agents import AGENT_VOICES, DEFAULT_VOICE
+from voice.voices import for_agent as chosen_voice
 from voice.state import (AWAY, BY_HANDSFREE, CALL_SILENT, KOKORO_MODELS, LOCK, PLAYING, TALKBACK_LOG, WORKER_PID, Playing,
                          Speaker, in_call, last_speaker, log, mic_busy, read_json, speaker_sink, target_session_since,
                          target_since)
@@ -116,7 +117,7 @@ class Voice:
         # Hands-free checks what it hears over a clip against the words (its own echo)
         Playing(path.name, clip.session, clip.agent, " ".join(sentences)).save()
         path.unlink(missing_ok=True)
-        voice = clip.voice or VOICES.get(clip.agent, DEFAULT_VOICE)
+        voice = clip.voice or (VOICES[clip.agent] if clip.agent in SYSTEM else chosen_voice(clip.agent))
         ready: queue.Queue = queue.Queue(maxsize=2)
         done = threading.Event()
 

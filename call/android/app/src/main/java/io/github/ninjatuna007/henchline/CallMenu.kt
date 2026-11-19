@@ -36,6 +36,7 @@ class CallMenu(
     private val onStayOn: (Boolean) -> Unit = {},
     private val cutIn: Boolean = false,
     private val onCutIn: (Boolean) -> Unit = {},
+    private val onVoices: () -> Unit = {},
     private val onHangUp: () -> Unit,
 ) : BottomPanel(activity) {
     fun show() {
@@ -58,6 +59,7 @@ class CallMenu(
         // Stay on: no "are you still there?" and no hang-up when quiet; with Hold to talk, a walkie-talkie
         sheet.addView(choice("Stay on", "Check on me", stayOn) { onStayOn(it); close() }, wide(8, px(48)))
         sheet.addView(choice("Cut in", "Let it wait", cutIn) { onCutIn(it); close() }, wide(8, px(48)))
+        sheet.addView(actionRow("🔊", "Voices", "How the agents sound", R.color.text) { close(); onVoices() }, wide(14))
         val hang = primary("Hang up", colour(R.color.hang), Color.WHITE).apply { setOnClickListener { close(); onHangUp() } }
         sheet.addView(hang, wide(20, px(52)))
     }

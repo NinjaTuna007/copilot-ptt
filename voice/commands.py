@@ -8,6 +8,7 @@ switched by the phone's own /model instead.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -22,6 +23,7 @@ PHONE = [
     ("context", "How full the context is, and what fills it"),
     ("workflow", "This chat's workflows: phases and agents, live"),
     ("away", "Away on or off: no listening at the laptop, agents text you instead of speaking"),
+    ("show", "A picture of this terminal, the screen, or one window"),
 ]
 
 BUILT_IN = {
@@ -126,5 +128,69 @@ def listed(agent: str, project: Path | None, home: Path | None = None) -> list[d
         seen.add(name)
         result.append({"name": name, "about": about[:160], "kind": kind})
     return result
+
+
+def skips_permissions(cmdline: bytes) -> bool:
+    """True when that Claude was started so Shift+Tab can land on bypass permissions. The chip then won't press it."""
+    return (b"dangerously-skip-permissions" in cmdline or b"bypassPermissions" in cmdline
+            or b"--permission-mode\x00bypass" in cmdline)
+
+
+def claude_settings(project: Path | None, home: Path | None = None) -> list[Path]:
+    """The user and project settings files that can set permissions.defaultMode."""
+    home = home or Path.home()
+    paths = [home / ".claude/settings.json", home / ".claude/settings.local.json"]
+    if project is not None:
+        paths += [project / ".claude/settings.json", project / ".claude/settings.local.json"]
+    return paths
+
+
+def settings_skip_permissions(paths: list[Path]) -> bool:
+    """True when one of those files sets permissions.defaultMode to bypassPermissions. A file that exists but
+    can't be read counts too: the chip won't press Shift+Tab without knowing. A missing file does not."""
+    for path in paths:
+        try:
+            raw = path.read_text()
+        except FileNotFoundError:
+            continue
+        except (OSError, UnicodeError):
+            return True
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return True
+        permissions = data.get("permissions") if isinstance(data, dict) else None
+        if isinstance(permissions, dict) and permissions.get("defaultMode") == "bypassPermissions":
+            return True
+    return False
+
+
+def shift_tab_result(before: str, after: str) -> str:
+    """After one Shift+Tab: "agent" when the footer left the previous mode for another safe one, "stop" when it
+    says bypass or never moved. Stop means the chip must not press Shift+Tab again."""
+    if after == "bypass" or not after or after == before:
+        return "stop"
+    return "agent"
+
+
+def plan_command_result(after: str) -> str:
+    """After /plan: "plan" only when the footer says so, "stop" on bypass, otherwise it did not switch."""
+    if after == "bypass":
+        return "stop"
+    return "plan" if after == "plan" else "unchanged"
+
+
+def claude_mode_word(screen: str) -> str:
+    """The mode Claude is showing at the bottom of its terminal: plan, bypass, accept, auto, manual, dontask.
+    Empty when none of those words are in the last lines. The latest phrase wins. Only the footer is read:
+    the same words further up the transcript must not count."""
+    tail = "\n".join(screen.splitlines()[-8:]).lower()
+    found, at = "", -1
+    for phrase, name in (("bypass permissions", "bypass"), ("plan mode", "plan"), ("accept edits", "accept"),
+                         ("auto mode", "auto"), ("manual mode", "manual"), ("don't ask", "dontask")):
+        where = tail.rfind(phrase)
+        if where > at:
+            found, at = name, where
+    return found
 
 

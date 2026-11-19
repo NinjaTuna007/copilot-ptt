@@ -40,13 +40,13 @@ HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(HERE.parent), str(HERE.parent / "handsfree/core")]  # voice/, and hands-free's routing
 import routing  # noqa: E402
 from routing import Heard  # noqa: E402
-from voice import commands, cursor_cli, files, pickup, plans, reminders, snaps, spool, usage, workflows  # noqa: E402
+from voice import commands, cursor_cli, files, pickup, plans, reminders, snaps, spool, screenshot, usage, voices, workflows  # noqa: E402
 from voice.agents import AGENT_VOICES, DEFAULT_VOICE  # noqa: E402
 from voice.desktop import current as desktop, cursor_bridge, tmux  # noqa: E402
 from voice.state import (AWAY, RENAMED, BY_HANDSFREE, CALL, CALL_BUTTON_ONLY, CALL_SILENT, CALL_STAY_ON, CALL_HANGUP, CALL_MIRROR, CALL_ORIGIN,  # noqa: E402
                          CALL_PINNED, CALL_RANG_BACK, CALL_TOLD, PHASE,
                          SPAWNED, TEXTS, VOICE_NOTE_STALE, VOICE_NOTES,
-                         CALL_PORT, CALL_PUSH, CALL_INTERRUPT, CALL_CUT_IN, CALL_CHECK,
+                         CALL_PORT, CALL_PUSH, CALL_INTERRUPT, CALL_CUT_IN, CALL_CHECK, CLAUDE_MODE,
                          CALL_RING, CALL_RINGER, CALL_TLS, HANDSFREE_LOG, HANDSFREE_MODE,
                          PHONE_MIC, PHONE_SPEAKER, PHONE_SPEAKER_MONITOR, Phase, Playing, SENT, SPEAKERS,
                          SPOOL, Sent, Speaker, in_call, last_speaker, log, phase_now, read_json,
@@ -703,6 +703,23 @@ async def crew_folders(request: web.Request) -> web.Response:
     return web.json_response({"folders": listed, "agents": tmux.available()})
 
 
+def usage_of(target: Speaker) -> dict:
+    """That agent's plan limits and context, the numbers the phone draws as bars (voice/usage.py). A Cursor CLI
+    chat has no composer record: its account limits still come from the hidden CLI, and context only when a record has it."""
+    if target.agent == "claude":
+        return usage.claude(target.session)
+    if target.agent == "codex":
+        return usage.codex(target.session)
+    if target.agent == "cursor" and cursor_bridge.chat_of(target.session):
+        record = cursor_bridge.composer(cursor_bridge.chat_of(target.session)) or {}
+        if record:
+            return usage.cursor(record)
+        limits, notes = usage.cursor_plan()
+        if limits or notes:
+            return {"model": "", "limits": limits, "context": None, "notes": notes}
+    return {}
+
+
 async def crew_usage(request: web.Request) -> web.Response:
     """The phone's /usage and /context: that agent's plan limits and context, as numbers for bars (voice/usage.py):
     {"agent", "model", "limits": [{label, percent, resets}], "context": {percent, size, used, parts}, "notes"}."""
@@ -712,17 +729,32 @@ async def crew_usage(request: web.Request) -> web.Response:
     if not target:
         return web.json_response({"note": "That agent isn't on the crew."}, status=404)
     loop = asyncio.get_running_loop()
-    if target.agent == "claude":
-        found = await loop.run_in_executor(None, usage.claude, session)
-    elif target.agent == "codex":
-        found = await loop.run_in_executor(None, usage.codex, session)
-    elif target.agent == "cursor" and cursor_bridge.chat_of(session):
-        found = usage.cursor(await loop.run_in_executor(None, cursor_bridge.composer, cursor_bridge.chat_of(session)))
-    else:
-        found = {}
+    found = await loop.run_in_executor(None, usage_of, target)
     if not found:
         return web.json_response({"note": f"{target.agent.capitalize()} hasn't reported its usage here yet."})
     return web.json_response({"agent": target.agent, **found})
+
+
+async def crew_usage_tell(request: web.Request) -> web.Response:
+    """Type the readout into the agent. {session, which: usage|context}. The bars stay on the phone. Not typed as
+    the slash command: that would open a panel and wait."""
+    trusted(request)
+    try:
+        body = await request.json()
+        session = str(body.get("session", ""))
+        which = str(body.get("which", "usage"))
+    except (ValueError, AttributeError):
+        raise web.HTTPBadRequest(text="expected JSON")
+    target = next((s for s in recent_speakers() if s.session == session), None)
+    if not target:
+        return web.json_response({"note": "That agent isn't on the crew."}, status=404)
+    loop = asyncio.get_running_loop()
+    found = await loop.run_in_executor(None, usage_of, target)
+    if not found:
+        return web.json_response({"note": f"{target.agent.capitalize()} hasn't reported its usage here yet."})
+    text = usage.words(found, "context" if which == "context" else "usage")
+    got, why = await loop.run_in_executor(None, to_agent, text, session, Heard.TEXTED, False)
+    return web.json_response({"to": got} if got else {"note": why})
 
 
 async def away(request: web.Request) -> web.Response:
@@ -746,6 +778,112 @@ async def away_state(request: web.Request) -> web.Response:
     """Whether the user is away, for the phone's avatar: {"away": bool}."""
     trusted(request)
     return web.json_response({"away": AWAY.exists()})
+
+
+async def voices_state(request: web.Request) -> web.Response:
+    """How the agents sound: the mode, and the voice each one is using now."""
+    trusted(request)
+    return web.json_response(voices.public())
+
+
+async def voices_save(request: web.Request) -> web.Response:
+    """A change from the voices sheet: {mode, voice, agent, again}."""
+    trusted(request)
+    try:
+        change = await request.json()
+    except ValueError:
+        raise web.HTTPBadRequest(text="expected JSON")
+    if not isinstance(change, dict):
+        raise web.HTTPBadRequest(text="expected JSON")
+    return web.json_response(voices.apply(change))
+
+
+async def voices_preview(request: web.Request) -> web.Response:
+    """One short line in a voice, as a file the phone can play: {"voice"} -> {"url", "name", "size"}."""
+    trusted(request)
+    try:
+        voice = str((await request.json()).get("voice", ""))
+    except (ValueError, AttributeError):
+        raise web.HTTPBadRequest(text="expected JSON")
+    loop = asyncio.get_running_loop()
+    try:
+        path = await loop.run_in_executor(None, voices.sample, voice)
+    except Exception as exc:  # noqa: BLE001 - Kokoro missing or a bad render: said, not a traceback to the phone
+        log(HANDSFREE_LOG, f"voice preview: {exc}")
+        return web.json_response({"note": "Couldn't make that preview."}, status=500)
+    if path is None:
+        return web.json_response({"note": "That isn't one of the voices."}, status=400)
+    def posted(path):
+        meta = files.post(path, "", "handsfree", "")
+        files.delivered(meta)  # a preview is for the phone to play, not a file waiting in the call chat
+        return meta
+
+    meta = await loop.run_in_executor(None, posted, path)
+    return web.json_response({"url": files.link(meta), "name": meta["name"], "size": meta["size"]})
+
+
+def _push_picture(meta: dict, target: Speaker) -> None:
+    """Off a call, the picture is a notification the phone opens in this chat. On a call the status loop sends it."""
+    if in_call() or not CALL_RING.exists() or not CALL_ORIGIN.exists():
+        return
+    origin = CALL_ORIGIN.read_text().strip()
+    body = json.dumps({"agent": target.agent, "session": target.session, "why": meta["text"],
+                       "file": {"url": origin + files.link(meta), "name": meta["name"], "type": meta["type"],
+                                "size": meta["size"]}}).encode()
+    try:
+        urllib.request.urlopen(urllib.request.Request(CALL_RING.read_text().strip(), data=body,
+                                                      headers={"Content-Type": "application/json"}), timeout=10).close()
+        files.delivered(meta)
+    except (OSError, ValueError):
+        pass
+
+
+async def show_windows(request: web.Request) -> web.Response:
+    """Windows the phone can ask for a picture of: [{id, app, title}]."""
+    trusted(request)
+    found = await asyncio.get_running_loop().run_in_executor(None, screenshot.windows)
+    return web.json_response({"windows": found})
+
+
+async def show_send(request: web.Request) -> web.Response:
+    """A picture into this chat. {session, what: pane|screen|window|find, id, query, words}."""
+    trusted(request)
+    try:
+        body = await request.json()
+    except ValueError:
+        raise web.HTTPBadRequest(text="expected JSON")
+    if not isinstance(body, dict):
+        raise web.HTTPBadRequest(text="expected JSON")
+    session = str(body.get("session", ""))
+    what = str(body.get("what", "pane"))
+    target = next((s for s in recent_speakers() if s.session == session), None)
+    if target is None:
+        return web.json_response({"note": "That agent isn't known to the laptop."}, status=404)
+    loop = asyncio.get_running_loop()
+    wid = str(body.get("id", ""))
+    if what == "find":
+        hits = screenshot.matching(await loop.run_in_executor(None, screenshot.windows), str(body.get("query", "")))
+        if len(hits) != 1:
+            note = "No window matches that." if not hits else "Several windows match. Pick one."
+            return web.json_response({"matches": hits, "note": note})
+        what, wid = "window", hits[0]["id"]
+        label = hits[0].get("title") or hits[0].get("app") or "a window"
+    elif what == "screen":
+        label = "the whole screen"
+    elif what == "window":
+        listed = await loop.run_in_executor(None, screenshot.windows)
+        match = next((item for item in listed if item["id"] == wid), None)
+        label = (match["title"] or match["app"]) if match else "a window"
+    else:
+        label = ""
+    pane = target.tab.address if target.tab and target.tab.owner == "tmux" else ""
+    path, why = await loop.run_in_executor(None, lambda: screenshot.take(what, wid, pane, label))
+    if path is None:
+        return web.json_response({"note": why})
+    words = str(body.get("words", "")).strip() or "Here."
+    meta = await loop.run_in_executor(None, files.post, path, words, target.agent, target.session)
+    await loop.run_in_executor(None, _push_picture, meta, target)
+    return web.json_response({"ok": True, "name": meta["name"]})
 
 
 async def chat_workflows(request: web.Request) -> web.Response:
@@ -976,12 +1114,13 @@ async def crew_models(request: web.Request) -> web.Response:
         slugs = [m["id"] for m in await loop.run_in_executor(None, tmux.models, "cursor")]
         shown = cursor_cli.menu(await loop.run_in_executor(None, cursor_bridge.catalog), slugs)
         if shown:
-            pane = []
-            if target.tab and target.tab.owner == tmux.OWNER:
+            current = await loop.run_in_executor(None, cursor_cli.saved, chat) if chat else {"model": "", "params": {}}
+            if not current.get("model") and target.tab and target.tab.owner == tmux.OWNER:
                 pane = await loop.run_in_executor(
                     None, lambda: tmux.out("capture-pane", "-p", "-t", target.tab.address).splitlines())
+                current = cursor_cli.reading(cursor_model(pane), shown)
             return web.json_response({"agent": agent, "switch": switchable, "now": now, "menu": shown,
-                                      "current": cursor_cli.reading(cursor_model(pane), shown)})
+                                      "current": current})
     return web.json_response({"agent": agent, "switch": switchable, "now": now,
                               "models": await loop.run_in_executor(None, tmux.models, agent)})
 
@@ -1032,19 +1171,173 @@ def plan_mode(target: Speaker) -> str:
     user's rule, 2026-11-17: the screen's placeholder text read as plan mode): Claude writes its permissionMode on
     every message in its session log; the Cursor CLI keeps "mode" in its chat store. "" when it can't be known."""
     if target.agent == "claude":
-        uuid = target.session.removeprefix("claude-")
-        logs = list((Path.home() / ".claude/projects").glob(f"*/{uuid}.jsonl")) if re.fullmatch(r"[0-9a-f-]{36}", uuid) else []
-        if len(logs) != 1:
-            return ""
-        try:
-            with logs[0].open("rb") as f:
-                f.seek(max(0, logs[0].stat().st_size - 4 * 1024 * 1024))
-                found = re.findall(rb'"permissionMode":"([A-Za-z]+)"', f.read())
-        except OSError:
-            return ""
-        return ("plan" if found[-1] == b"plan" else "agent") if found else ""
+        logged = _claude_logged(target)
+        seen = _seen_claude(target)
+        # The chip's press is remembered until the log, which Claude writes on its next message, says the same thing
+        if seen and logged and (seen == "plan") == (logged == "plan"):
+            _forget_claude(target)
+            seen = ""
+        return seen or logged
     meta = cursor_meta(target)
     return ("plan" if meta.get("mode") == "plan" else "agent") if meta.get("mode") else ""
+
+
+def _claude_uuid(target: Speaker) -> str:
+    uuid = target.session.removeprefix("claude-")
+    return uuid if re.fullmatch(r"[0-9a-f-]{36}", uuid) else ""
+
+
+def _claude_logged(target: Speaker) -> str:
+    """"plan" or "agent" from the last permissionMode in Claude's session log, or "" when it can't be read."""
+    uuid = _claude_uuid(target)
+    logs = list((Path.home() / ".claude/projects").glob(f"*/{uuid}.jsonl")) if uuid else []
+    if len(logs) != 1:
+        return ""
+    try:
+        with logs[0].open("rb") as f:
+            f.seek(max(0, logs[0].stat().st_size - 4 * 1024 * 1024))
+            found = re.findall(rb'"permissionMode":"([A-Za-z]+)"', f.read())
+    except OSError:
+        return ""
+    return ("plan" if found[-1] == b"plan" else "agent") if found else ""
+
+
+def _seen_claude(target: Speaker) -> str:
+    uuid = _claude_uuid(target)
+    if not uuid:
+        return ""
+    try:
+        word = (CLAUDE_MODE / uuid).read_text().strip()
+    except OSError:
+        return ""
+    return word if word in {"plan", "agent"} else ""
+
+
+def _remember_claude(target: Speaker, word: str) -> None:
+    uuid = _claude_uuid(target)
+    if not uuid:
+        return
+    CLAUDE_MODE.mkdir(parents=True, exist_ok=True)
+    (CLAUDE_MODE / uuid).write_text("plan" if word == "plan" else "agent")
+
+
+def _forget_claude(target: Speaker) -> None:
+    uuid = _claude_uuid(target)
+    if uuid:
+        (CLAUDE_MODE / uuid).unlink(missing_ok=True)
+
+
+def _presses_stopped(target: Speaker) -> bool:
+    """Shift+Tab already landed somewhere the chip must not press again."""
+    uuid = _claude_uuid(target)
+    return bool(uuid) and (CLAUDE_MODE / f"{uuid}.stopped").is_file()
+
+
+def _stop_presses(target: Speaker) -> None:
+    uuid = _claude_uuid(target)
+    if not uuid:
+        return
+    CLAUDE_MODE.mkdir(parents=True, exist_ok=True)
+    (CLAUDE_MODE / f"{uuid}.stopped").write_text("stopped")
+
+
+def _allow_presses(target: Speaker) -> None:
+    uuid = _claude_uuid(target)
+    if uuid:
+        (CLAUDE_MODE / f"{uuid}.stopped").unlink(missing_ok=True)
+
+
+def _footer(address: str) -> str:
+    return commands.claude_mode_word(tmux.out("capture-pane", "-p", "-t", address))
+
+
+def _watch_footer(address: str, before: str, seconds: float = 2.4) -> str:
+    """The footer after a press, read until it moves, says bypass, or the wait is up. One quick read can miss it."""
+    deadline = time.time() + seconds
+    after = before
+    while True:
+        after = _footer(address)
+        if after == "bypass" or (after and after != before) or time.time() >= deadline:
+            return after
+        time.sleep(0.3)
+
+
+def _may_press_tab(target: Speaker) -> str:
+    """"" when Shift+Tab is safe to try, otherwise the note. Refuses a command line or settings that can reach
+    bypass permissions, and a project that can't be found (its settings would go unread)."""
+    pid = desktop().terminals.agent_pid(target.tab) or target.pid
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes() if pid else b""
+    except OSError:
+        raw = b""
+    project = project_of(target)
+    if (not raw or project is None or commands.skips_permissions(raw)
+            or commands.settings_skip_permissions(commands.claude_settings(project))):
+        return "This Claude can reach bypass permissions, so the chip won't press Shift+Tab. Leave it with Build this."
+    return ""
+
+
+def leave_claude_plan(target: Speaker) -> tuple[str, str]:
+    """One Shift+Tab out of plan mode. (mode, note). Refuses while Claude is busy, when its command line or its
+    settings can reach bypass permissions, or when an earlier press already landed badly. The press is confirmed
+    on the footer. A miss, or bypass, stops further presses: the chip stays on plan and does not send another."""
+    if not target.tab or target.tab.owner != tmux.OWNER:
+        return "plan", "Claude isn't in a terminal I can switch."
+    if claude_working(target) is not False:
+        return "plan", "Claude is busy. The chip waits until it is idle."
+    address = target.tab.address
+    if _presses_stopped(target):
+        word = _footer(address)
+        if word and word not in {"plan", "bypass"}:  # the user moved it in the terminal
+            _allow_presses(target)
+            _remember_claude(target, "agent")
+            return "agent", ""
+        return "plan", "The chip won't press Shift+Tab again. Switch it in Claude's terminal."
+    why = _may_press_tab(target)
+    if why:
+        return "plan", why
+    before = _footer(address)
+    if before == "bypass":
+        _stop_presses(target)
+        log(HANDSFREE_LOG, "plan chip: Claude is on bypass permissions: not pressing")
+        return "plan", "Claude is on bypass permissions, so the chip won't press Shift+Tab."
+    tmux.tmux("send-keys", "-t", address, "BTab")
+    verdict = commands.shift_tab_result(before, _watch_footer(address, before))
+    if verdict == "stop":
+        _stop_presses(target)
+        log(HANDSFREE_LOG, "plan chip: Shift+Tab missed or landed on bypass: no further press")
+        return "plan", "That press didn't leave plan mode cleanly, so I won't press Shift+Tab again. Switch it in Claude's terminal."
+    _allow_presses(target)
+    _remember_claude(target, "agent")
+    return "agent", ""
+
+
+def enter_claude_plan(target: Speaker) -> tuple[str, str]:
+    """Ask Claude for plan mode with its own /plan. Only while it is idle, and only in a terminal. The chip
+    remembers plan only once the footer says so, so the next tap cannot Shift+Tab out of some other mode."""
+    mode = plan_mode(target) or "agent"
+    if claude_working(target) is not False:
+        return mode, "Claude is busy. The chip waits until it is idle."
+    if not target.tab or target.tab.owner != tmux.OWNER:
+        return mode, "Claude isn't in a terminal I can switch."
+    if _presses_stopped(target):
+        return mode, "The chip won't press keys in this Claude. Switch it in the terminal."
+    address = target.tab.address
+    before = _footer(address)
+    if before == "bypass":
+        _stop_presses(target)
+        return mode, "Claude is on bypass permissions, so the chip won't type into it."
+    if not desktop().terminals.type_line(target.tab, "/plan"):
+        return mode, "Couldn't type /plan into Claude."
+    verdict = commands.plan_command_result(_watch_footer(address, before))
+    if verdict == "stop":
+        _stop_presses(target)
+        log(HANDSFREE_LOG, "plan chip: /plan showed bypass permissions: stopped")
+        return mode, "That showed bypass permissions, so the chip won't press anything else. Switch it in Claude's terminal."
+    if verdict != "plan":
+        return mode, "Claude didn't switch to plan mode, so the chip was left as it was."
+    _remember_claude(target, "plan")
+    return "plan", "Plan mode on. Tap the chip again, once Claude is idle, to leave it."
 
 
 def cursor_meta(target: Speaker) -> dict:
@@ -1102,28 +1395,24 @@ async def crew_plan(request: web.Request) -> web.Response:
     if target is None or target.agent not in ("claude", "cursor"):
         return web.json_response({"note": "Plan mode is there for Claude and Cursor."}, status=400)
     loop = asyncio.get_running_loop()
+    known = await loop.run_in_executor(None, plan_mode, target)
+    mode = known or "agent"
     if target.agent == "cursor" and not target.in_editor:  # each press checked in Cursor's own store
-        now = await loop.run_in_executor(None, plan_mode, target)
-        want = "default" if now == "plan" else "plan"
+        want = "default" if mode == "plan" else "plan"
         got = await loop.run_in_executor(None, switch_cursor_mode, target, want)
         if got:
             note = "" if got == want else (f"Cursor is in {got} mode: it didn't move further, so finish what's on its "
                                            "screen first, or switch it in its terminal.")
             return web.json_response({"mode": "plan" if got == "plan" else "agent", **({"note": note} if note else {})})
-    mode = await loop.run_in_executor(None, plan_mode, target)
-    # Claude: into plan mode only, with its own /plan (a command, not a key cycle: nothing can land elsewhere). Out
-    # of it by approving the plan (Build this), as in Claude itself: a Shift+Tab out can't be checked (its mode is
-    # logged only with its next message) and from plan mode one press can land on bypass-permissions (the user
-    # agreed, 2026-11-17)
-    if target.agent == "claude" and target.tab and mode != "plan":
-        typed = await loop.run_in_executor(None, desktop().terminals.type_line, target.tab, "/plan")
-        if typed:
-            # Not "plan" yet: Claude records its mode only with its next message, so the chip waits for that
-            return web.json_response({"mode": mode, "note": "Asked Claude for plan mode: the chip shows it once Claude "
-                                                            "has. To leave it, approve the plan with Build this."})
-    if target.agent == "claude" and mode == "plan":
-        return web.json_response({"mode": mode, "note": "Claude leaves plan mode when you approve its plan: Build this, "
-                                                        "on the Plan tab."})
+    if target.agent == "claude":
+        if not known:
+            return web.json_response({"note": "I can't tell whether Claude is in plan mode."}, status=409)
+        step = leave_claude_plan if mode == "plan" else enter_claude_plan
+        got, note = await loop.run_in_executor(None, step, target)
+        body = {"mode": got or mode or "agent"}
+        if note:
+            body["note"] = note
+        return web.json_response(body)
     return web.json_response({"mode": mode, "note": "Plan mode can't be switched from the phone for this agent yet. "
                                                     "Type /plan, or press Shift+Tab in its terminal."}, status=409)
 
@@ -1147,6 +1436,10 @@ def model_label(target: Speaker) -> str:
         context = settings.get("context", "").upper()
         fast = "fast" if settings.get("fast") == "true" else ""
         return " · ".join(x for x in ((entry or {}).get("name", used), effort, context, fast) if x)
+    if target.agent == "cursor" and not target.in_editor:
+        got = cursor_cli.saved(cursor_bridge.chat_of(target.session))
+        entry = next((m for m in cursor_bridge.catalog() if m["id"] == got.get("model")), None)
+        return cursor_cli.described(entry, got.get("params") or {})
     return ""
 
 
@@ -1209,7 +1502,12 @@ def model_in_use(target: Speaker) -> str:
         effort = next((v["name"] for p in entry["params"] if p["id"] in ("reasoning_effort", "reasoning")
                        for v in p["values"] if v["value"] == settings.get(p["id"])), "")
         return f"{entry['name']} {effort}".strip()
-    if target.tab.owner != tmux.OWNER:
+    if target.agent == "cursor" and not target.in_editor:
+        got = cursor_cli.saved(cursor_bridge.chat_of(target.session))
+        if got.get("model"):
+            entry = next((m for m in cursor_bridge.catalog() if m["id"] == got["model"]), None)
+            return cursor_cli.described(entry, got.get("params") or {})
+    if not target.tab or target.tab.owner != tmux.OWNER:
         return ""
     lines = tmux.out("capture-pane", "-p", "-t", target.tab.address).splitlines()
     if target.agent == "cursor":
@@ -1218,6 +1516,25 @@ def model_in_use(target: Speaker) -> str:
         found = [m.group(1) for line in lines if (m := re.match(r"\s*(\S+(?: \S+)?) · [~/]", line))]
         return found[-1] if found else ""
     return ""
+
+
+def switch_cursor_plain(target: Speaker, model_id: str) -> str:
+    """A Cursor CLI chat onto a model with no settings, Auto included. Typed as `/model <slug>` in whatever
+    terminal it is in (Konsole or tmux). "" when its own record then says that model."""
+    chat = cursor_bridge.chat_of(target.session)
+    if cursor_cli.on_model(chat, model_id):
+        return ""
+    terminals = desktop().terminals
+    if not target.tab or not terminals.agent_running(target.tab):
+        return "That agent isn't running."
+    if not terminals.type_line(target.tab, f"/model {cursor_cli.cli_slug(model_id)}"):
+        return "Couldn't type into it."
+    deadline = time.monotonic() + 4
+    while time.monotonic() < deadline:
+        if cursor_cli.on_model(chat, model_id):
+            return ""
+        time.sleep(0.4)
+    return "Cursor didn't switch. If a model list is open in that terminal, press Escape."
 
 
 def switch_claude(target: Speaker, model: str, settings: dict) -> str:
@@ -1365,20 +1682,24 @@ async def crew_model(request: web.Request) -> web.Response:
         log(HANDSFREE_LOG, f"{target.spoken()} switched to {wanted} {settings} from the phone")
         return web.json_response({"ok": True, "name": wanted,
                                   "note": "Switched. Cursor also makes it the default for new chats."})
-    if target.agent == "cursor" and not target.in_editor and settings:
-        picked = {str(p.get("id")): str(p.get("value")) for p in settings if isinstance(p, dict)}
+    if target.agent == "cursor" and not target.in_editor:
         entry = next((m for m in await loop.run_in_executor(None, cursor_bridge.catalog) if m["id"] == wanted), None)
-        if entry is None or not cursor_cli.valid(entry, picked):
-            return web.json_response({"note": "Cursor has no such setting for that model."}, status=400)
-        if not target.tab or target.tab.owner != tmux.OWNER:
-            return web.json_response({"note": "That Cursor chat isn't in a tmux pane, so its model editor can't be "
-                                              "driven from here."}, status=400)
-        why = await loop.run_in_executor(None, cursor_cli.apply, target.tab.address, entry, picked)
-        if why and not why.startswith("Switched"):
-            return web.json_response({"note": why}, status=409)
-        log(HANDSFREE_LOG, f"{target.spoken()} switched to {wanted} {picked} from the phone")
-        return web.json_response({"ok": True, "name": wanted,
-                                  "note": why or "Switched. Cursor also makes it the default for new CLI chats."})
+        if entry is not None:
+            picked = {str(p.get("id")): str(p.get("value")) for p in settings if isinstance(p, dict)}
+            if entry.get("params"):
+                if not cursor_cli.valid(entry, picked):
+                    return web.json_response({"note": "Cursor has no such setting for that model."}, status=400)
+                if not target.tab:
+                    return web.json_response({"note": "That agent isn't running."}, status=400)
+                why = await loop.run_in_executor(
+                    None, cursor_cli.apply_tab, target.tab, entry, picked, cursor_bridge.chat_of(target.session))
+            else:
+                why = await loop.run_in_executor(None, switch_cursor_plain, target, wanted)
+            if why and not why.startswith("Switched"):
+                return web.json_response({"note": why}, status=409)
+            log(HANDSFREE_LOG, f"{target.spoken()} switched to {wanted} {picked} from the phone")
+            return web.json_response({"ok": True, "name": entry.get("name") or wanted,
+                                      "note": why or "Switched. Cursor also makes it the default for new CLI chats."})
     if target.agent == "claude" and any(m["id"] == wanted for m in tmux.menu("claude")):
         chosen = tmux.checked("claude", wanted, {str(p.get("id")): str(p.get("value")) for p in settings
                                                   if isinstance(p, dict)})
