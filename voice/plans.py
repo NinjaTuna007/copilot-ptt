@@ -1,8 +1,9 @@
 """A chat's plan document, for the phone.
 
 Cursor keeps one markdown file per plan in ~/.cursor/plans, with a to-do list in the header (pending, in progress,
-done) and a mermaid diagram in the body. The phone shows the steps and how many are done. Claude and Codex use the
-same file shape when they have one: a *.plan.md in the project, or in ~/.claude/plans or ~/.codex/plans.
+done) and a mermaid diagram in the body. The phone shows the steps and how many are done. Claude records its plan
+file too. Codex currently exposes no session-owned plan file, so the phone shows none instead of guessing from
+another chat's files.
 """
 
 from __future__ import annotations
@@ -346,10 +347,10 @@ def _for_chat(home: Path, key: str) -> Path | None:
 
 
 def of_session(session: str, project: Path | None) -> dict | None:
-    """That chat's own plan, parsed; else, as before, the newest plan naming its project."""
+    """That exact chat's own plan, parsed. Never infer ownership from its agent or project."""
     path = for_session(session)
-    if path is None:  # only a plan that names its project, never the newest one anywhere
-        return find(project) if project else None
+    if path is None:
+        return None
     try:
         plan = parse(path.read_text(errors="replace"))
     except OSError:

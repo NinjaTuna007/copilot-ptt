@@ -118,6 +118,47 @@ flowchart LR
         self.assertEqual(got["name"], "henchline work")
         self.assertTrue(got["file"].endswith("mine.plan.md"))
 
+    def test_codex_does_not_infer_a_plan_from_agent_or_project(self):
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cursor = root / ".cursor/plans/cursor.plan.md"
+            codex = root / ".codex/plans/codex.plan.md"
+            cursor.parent.mkdir(parents=True)
+            codex.parent.mkdir(parents=True)
+            project = root / "henchline"
+            project.mkdir()
+            local = project / "local.plan.md"
+            cursor.write_text(SAMPLE.replace("Phone plan", "henchline cursor work"))
+            codex.write_text(SAMPLE.replace("Phone plan", "henchline codex work"))
+            local.write_text(SAMPLE.replace("Phone plan", "henchline local work"))
+
+            with mock.patch.object(Path, "home", return_value=root):
+                first = plans.of_session("codex-00000000-0000-0000-0000-000000000001", project)
+                second = plans.of_session("codex-00000000-0000-0000-0000-000000000002", project)
+                unknown = plans.of_session("agent-some-chat", project)
+
+        self.assertIsNone(first)
+        self.assertIsNone(second)
+        self.assertIsNone(unknown)
+
+    def test_codex_with_no_plan_does_not_show_the_cursor_plan(self):
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cursor = root / ".cursor/plans/cursor.plan.md"
+            cursor.parent.mkdir(parents=True)
+            project = root / "henchline"
+            project.mkdir()
+            cursor.write_text(SAMPLE.replace("Phone plan", "henchline cursor work"))
+
+            with mock.patch.object(Path, "home", return_value=root):
+                got = plans.of_session("codex-00000000-0000-0000-0000-000000000001", project)
+
+        self.assertIsNone(got)
+
 
 if __name__ == "__main__":
     unittest.main()

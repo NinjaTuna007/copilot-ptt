@@ -928,7 +928,7 @@ async def chat_plan_build(request: web.Request) -> web.Response:
         return web.json_response({"note": "That agent isn't known to the laptop."}, status=404)
     loop = asyncio.get_running_loop()
     project = await loop.run_in_executor(None, project_of, target)
-    plan = await loop.run_in_executor(None, plans.find, project)
+    plan = await loop.run_in_executor(None, plans.of_session, session, project)
     if plan is None:
         return web.json_response({"note": "This chat has no plan."}, status=404)
     got, why = await loop.run_in_executor(None, to_agent, plans.approval(plan), session, Heard.TEXTED, False)
