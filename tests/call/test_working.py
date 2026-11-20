@@ -118,6 +118,25 @@ class Codex(unittest.TestCase):
         codex_log("task_started")
         self.assertIsNone(server.codex_working(Speaker("codex-_home_u_other", "codex", "other")))
 
+    def test_only_explicit_commentary_becomes_a_thought(self):
+        folder = Path.home() / ".codex/sessions/2026/11/20"
+        folder.mkdir(parents=True, exist_ok=True)
+        entries = [
+            {"timestamp": "2026-11-20T01:00:00.000Z", "type": "response_item",
+             "payload": {"type": "reasoning", "encrypted_content": "secret"}},
+            {"timestamp": "2026-11-20T01:00:01.000Z", "type": "event_msg",
+             "payload": {"type": "agent_message", "phase": "commentary", "message": "Checking the tests."}},
+            {"timestamp": "2026-11-20T01:00:01.000Z", "type": "response_item",
+             "payload": {"type": "message", "phase": "commentary", "content": "duplicate"}},
+            {"timestamp": "2026-11-20T01:00:02.000Z", "type": "event_msg",
+             "payload": {"type": "agent_message", "phase": "final", "message": "Done."}},
+        ]
+        (folder / f"rollout-test-{UUID}.jsonl").write_text("\n".join(json.dumps(x) for x in entries) + "\n")
+        speaker = Speaker(f"codex-{UUID}", "codex", "proj")
+        self.assertEqual(server.codex_thoughts(speaker, "2026-11-20T01:00:00.500Z"), [
+            {"at": "2026-11-20T01:00:01.000Z", "text": "Checking the tests."}])
+        self.assertEqual(server.codex_thoughts(speaker, "2026-11-20T01:00:01.000Z"), [])
+
 
 if __name__ == "__main__":
     unittest.main()

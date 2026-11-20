@@ -1,14 +1,15 @@
 """voice/chains.py: a boss may deploy, a child may not, and a report carries each correction once."""
 
 import unittest
+import threading
 from pathlib import Path
 from unittest import mock
 
 from tests import sandbox  # first: a throwaway HOME
 from voice import chains
 from voice.desktop import Tab
-from voice.minions import deploy, end, report
-from voice.state import CALL_PINNED, SPEAKERS, Speaker
+from voice.minions import _hand_up, deploy, end, end_session, report
+from voice.state import CALL_PINNED, LAST, RENAMED, SPEAKERS, Speaker
 
 assert sandbox.HOME
 
@@ -21,6 +22,9 @@ class Chains(unittest.TestCase):
         if SPEAKERS.is_dir():
             for path in SPEAKERS.glob("*.json"):
                 path.unlink()
+        LAST.unlink(missing_ok=True)
+        RENAMED.unlink(missing_ok=True)
+        chains.PHONE_VIEWS.unlink(missing_ok=True)
 
     def test_a_depth_2_child_cannot_deploy(self):
         chain = chains.open("boss")
@@ -188,6 +192,7 @@ class Chains(unittest.TestCase):
         self.assertEqual(launch["pid"], 42)
         self.assertEqual(launch["parent"], "boss")
         self.assertEqual(launch["depth"], 2)
+        self.assertEqual(launch["ask"], "fix the parser")
         self.assertFalse(launch["may_deploy"])
         self.assertNotIn(str(folder), __import__("json").dumps(launch))
         for args, _kwargs in server.notice.call_args_list:
@@ -287,19 +292,214 @@ class Chains(unittest.TestCase):
         self.assertEqual(chains.bind("cursor-33333333-3333-3333-3333-333333333333", "%1", 9), "")
         self.assertEqual(chains.parent_of(chat), "boss")
 
-    def test_end_waits_while_the_user_is_in_the_chat(self):
-        from voice.state import LAST
+    def test_a_renamed_boss_keeps_the_same_job_and_strip(self):
+        from voice.state import renamed
+        old = "cursor-_home_shekharu_henchline"
+        new = "cursor-22222222-2222-2222-2222-222222222222"
+        child_old = "claude-_home_shekharu_henchline"
+        child_new = "claude-33333333-3333-3333-3333-333333333333"
+        chain = chains.open(old)
+        chains.append(chain, "launch", parent=old, session=child_old, pane="%1", pid=5, depth=2,
+                      agent="claude", where="henchline", ask="review it")
+        renamed(old, new)
+        renamed(child_old, child_new)
+        self.assertEqual(chains.chain_of(new), chain)
+        shown = chains.view(new)
+        self.assertTrue(shown["is_boss"])
+        self.assertEqual(shown["boss"], new)
+        self.assertEqual(shown["minions"][0]["session"], child_new)
+        self.assertEqual(chains.view(child_new)["boss"], new)
+        self.assertEqual(chains.pane_of(child_new), "%1")
+        self.assertEqual(chains.allow(chain, new, 1), "")
+        self.assertEqual(chains.open(new), chain)
+
+    def test_reports_and_final_hand_up_follow_a_renamed_boss(self):
+        from voice.state import renamed
+        old = "cursor-_home_shekharu_henchline"
+        new = "cursor-22222222-2222-2222-2222-222222222222"
+        chain = chains.open(old)
+        chains.append(chain, "launch", parent=old, session="child", pane="%1", pid=5, depth=2,
+                      agent="claude", where="henchline")
+        renamed(old, new)
+        Speaker(new, "cursor", "henchline", Tab("tmux", "%9"), pid=9).save(SPEAKERS / f"{new}.json")
+        child = Speaker("child", "claude", "henchline", Tab("tmux", "%1"), pid=5)
+        delivered = []
+
+        def take(text, _heard, to=None, urgent=False):
+            delivered.append((text, to.session))
+            return True
+
+        with mock.patch("routing.deliver", side_effect=take):
+            self.assertEqual(report(["first result"], lambda: child), 0)
+            chains.append(chain, "correction", session="child", text="late words", pane="%1", pid=5)
+            self.assertTrue(_hand_up("child"))
+        self.assertEqual([session for _text, session in delivered], [new, new])
+        self.assertIn("first result", delivered[0][0])
+        self.assertIn("late words", delivered[1][0])
+        self.assertEqual(chains.pending_corrections("child"), [])
+
+    def test_a_stale_renamed_child_can_still_be_ended_by_its_current_key(self):
+        from voice.state import renamed
+        old = "claude-_home_shekharu_henchline"
+        new = "claude-33333333-3333-3333-3333-333333333333"
         chain = chains.open("boss")
-        chains.append(chain, "launch", parent="boss", session="child", pane="%1", pid=1, depth=2)
+        chains.append(chain, "launch", parent="boss", session=old, pane="%1", pid=5, depth=2,
+                      agent="claude", where="henchline")
+        renamed(old, new)
+        Speaker(new, "claude", "henchline", Tab("tmux", "%1"), at=0, pid=5).save(SPEAKERS / f"{new}.json")
+        server = mock.Mock()
+        server.owns.return_value = True
+        server.spawned.side_effect = lambda change=None: []
+        with mock.patch("voice.desktop.tmux.end", return_value=True) as ended, \
+                mock.patch("voice.minions._server", return_value=server):
+            self.assertEqual(end_session(new, force=True), 0)
+        ended.assert_called_once()
+        server.owns.assert_called_once_with("%1", 5)
+        self.assertEqual(chains.view("boss")["minions"][0]["state"], "ended")
+
+    def test_end_waits_while_the_user_is_in_the_chat(self):
+        chain = chains.open("boss")
+        chains.append(chain, "launch", parent="boss", session="child", pane="%1", pid=1, depth=2,
+                      agent="claude", where="job", ask="check it")
         Speaker("child", "claude", "job", Tab("tmux", "%1"), pid=1).save(SPEAKERS / "child.json")
-        Speaker("child", "claude", "job", Tab("tmux", "%1"), pid=1).save(LAST)
+        chains.note_phone_view("child")
+        self.assertTrue(chains.phone_viewing("child"))
         server = mock.Mock()
         server.owns.return_value = True
         with mock.patch("voice.desktop.tmux.end") as ended, \
                 mock.patch("voice.minions._server", return_value=server):
-            self.assertEqual(end(["child"]), 1)
+            self.assertEqual(end(["child"]), 0)
         ended.assert_not_called()
         self.assertFalse(any(e.get("kind") == "ended" for e in chains.history(chain)))
+        self.assertTrue(chains.pending_end("child"))
+        shown = chains.view("boss")
+        self.assertEqual(shown["used"], 1)
+        self.assertEqual(shown["slots"], 8)
+        self.assertEqual(shown["minions"][0]["handoffs"][0]["text"], "check it")
+        self.assertTrue(chains.keep("child"))
+        self.assertFalse(chains.pending_end("child"))
+        self.assertFalse(chains.decide_end("child", "end"))
+
+    def test_a_correction_arriving_during_delivery_is_handed_up_too(self):
+        chain = chains.open("boss")
+        chains.append(chain, "launch", parent="boss", session="child", pane="%1", pid=1, depth=2)
+        chains.append(chain, "correction", session="child", text="first")
+        Speaker("boss", "claude", "job", Tab("tmux", "%9")).save(SPEAKERS / "boss.json")
+        delivered = []
+
+        def during(text, heard, to=None, urgent=False):
+            delivered.append(text)
+            if len(delivered) == 1:
+                chains.append(chain, "correction", session="child", text="late")
+            return True
+
+        with mock.patch("routing.deliver", side_effect=during):
+            self.assertTrue(_hand_up("child"))
+        self.assertEqual(len(delivered), 2)
+        self.assertIn("first", delivered[0])
+        self.assertIn("late", delivered[1])
+        self.assertEqual(chains.pending_corrections("child"), [])
+
+    def test_a_delivery_and_forced_end_share_the_last_chance_lock(self):
+        chain = chains.open("boss")
+        chains.append(chain, "launch", parent="boss", session="child", pane="%1", pid=1, depth=2,
+                      agent="claude", where="job")
+        Speaker("boss", "claude", "job", Tab("tmux", "%9"), pid=9).save(SPEAKERS / "boss.json")
+        child = Speaker("child", "claude", "job", Tab("tmux", "%1"), pid=1)
+        child.save(SPEAKERS / "child.json")
+
+        typed = threading.Event()
+        let_type_return = threading.Event()
+        end_checking = threading.Event()
+        terms = mock.Mock()
+        terms.agent_running.return_value = True
+
+        def type_line(_tab, _message, **_kwargs):
+            typed.set()
+            self.assertTrue(let_type_return.wait(3), "the test did not release terminal typing")
+            return True
+
+        terms.type_line.side_effect = type_line
+        desk = mock.Mock(terminals=terms)
+        server = mock.Mock()
+        server.owns.return_value = True
+        server.spawned.side_effect = lambda change=None: []
+        outcomes = {}
+        actual_canonical = chains.canonical
+
+        def canonical(session):
+            end_checking.set()
+            return actual_canonical(session)
+
+        import routing
+        with mock.patch("routing.desktop", return_value=desk), \
+                mock.patch("routing.deliver", return_value=True), \
+                mock.patch("voice.minions.chains.canonical", side_effect=canonical), \
+                mock.patch("voice.desktop.tmux.end", return_value=True) as ended, \
+                mock.patch("voice.minions._server", return_value=server):
+            sender = threading.Thread(target=lambda: outcomes.update(
+                sent=routing.deliver_words("late words", routing.Heard.TEXTED, to=child)))
+            sender.start()
+            self.assertTrue(typed.wait(3))
+            closer = threading.Thread(target=lambda: outcomes.update(ended=end_session("child", force=True)))
+            closer.start()
+            self.assertTrue(end_checking.wait(3))
+            self.assertTrue(closer.is_alive(), "end did not wait for the in-flight delivery")
+            ended.assert_not_called()
+            let_type_return.set()
+            sender.join(3)
+            closer.join(3)
+        self.assertFalse(sender.is_alive())
+        self.assertFalse(closer.is_alive())
+        self.assertEqual(outcomes, {"sent": True, "ended": 0})
+        self.assertEqual(chains.pending_corrections("child"), [])
+        kinds = [event["kind"] for event in chains.history(chain)]
+        self.assertLess(kinds.index("correction"), kinds.index("ended"))
+
+    def test_job_timeline_keeps_interleaved_handoffs_in_append_order(self):
+        chain = chains.open("boss")
+        chains.append(chain, "launch", parent="boss", session="a", pane="%1", pid=1, depth=2,
+                      agent="claude", where="one", ask="ask a")
+        chains.append(chain, "launch", parent="boss", session="b", pane="%2", pid=2, depth=2,
+                      agent="codex", where="two", ask="ask b")
+        chains.append(chain, "correction", session="a", text="correct a", pane="%1", pid=1)
+        chains.append(chain, "report", session="b", text="report b", exact=True)
+        self.assertEqual([(item["kind"], item["text"]) for item in chains.view("boss")["handoffs"]], [
+            ("ask", "ask a"), ("ask", "ask b"), ("correction", "correct a"), ("report", "report b")])
+
+    def test_handoffs_are_ordered_and_force_hands_words_up_before_ending(self):
+        chain = chains.open("boss")
+        chains.append(chain, "launch", parent="boss", pane="%1", pid=1, depth=2,
+                      agent="claude", where="job", ask="inspect this")
+        chains.bind("child", "%1", 1)
+        chains.append(chain, "report", session="child", text="first result")
+        chains.append(chain, "correction", session="child", text="also check the lock", pane="%1", pid=1)
+        shown = chains.view("child")
+        self.assertFalse(shown["is_boss"])
+        self.assertEqual([(h["kind"], h["text"]) for h in shown["minions"][0]["handoffs"]], [
+            ("ask", "inspect this"), ("report", "first result"), ("correction", "also check the lock")])
+
+        Speaker("child", "claude", "job", Tab("tmux", "%1"), pid=1).save(SPEAKERS / "child.json")
+        server = mock.Mock()
+        server.owns.return_value = True
+        server.spawned.side_effect = lambda change=None: []
+        def handed(session):
+            chains.mark_reported(session, chains.pending_corrections(session))
+            return True
+
+        with mock.patch("voice.desktop.tmux.end", return_value=True), \
+                mock.patch("voice.minions._server", return_value=server), \
+                mock.patch("voice.minions._hand_up", side_effect=handed) as handed_up:
+            self.assertEqual(end_session("child", force=True), 0)
+        handed_up.assert_called_once_with("child")
+        self.assertEqual(chains.view("boss")["minions"][0]["state"], "ended")
+        chains.append(chain, "launch", parent="boss", pane="%1", pid=1, depth=2,
+                      agent="claude", where="job", ask="a new task")
+        chains.bind("child-2", "%1", 1)
+        chains.append(chain, "report", session="child-2", text="new result")
+        shown = chains.view("boss")["minions"]
+        self.assertNotIn("new result", [h["text"] for h in shown[0]["handoffs"]])
+        self.assertEqual(shown[1]["handoffs"][-1]["text"], "new result")
 
     def test_a_trust_question_that_stays_up_does_not_take_a_slot(self):
         folder = Path.home() / "workproj"

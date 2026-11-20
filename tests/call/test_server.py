@@ -22,6 +22,9 @@ class Routes(AioHTTPTestCase):
         app = web.Application()
         app.router.add_post("/text", server.texted)
         app.router.add_post("/share/tell", server.share_tell)
+        app.router.add_get("/chat/minions", server.chat_minions)
+        app.router.add_post("/chat/minions/view", server.chat_minion_view)
+        app.router.add_post("/chat/minions/decide", server.chat_minion_decide)
         return app
 
     def origin(self):
@@ -55,6 +58,33 @@ class Routes(AioHTTPTestCase):
         answer = await self.client.post("/share/tell", json={"files": ["nope.bin"], "session": "claude-1"},
                                          headers=self.origin())
         self.assertEqual(answer.status, 400)
+
+    async def test_delegated_job_is_scoped_to_the_named_chat(self):
+        shown = {"boss": "boss", "used": 1, "slots": 8, "minions": []}
+        with mock.patch.object(server.chains, "view", return_value=shown) as view:
+            answer = await self.client.get("/chat/minions?session=boss", headers=self.origin())
+        self.assertEqual(await answer.json(), {"chain": shown})
+        view.assert_called_once_with("boss")
+
+        with mock.patch.object(server.chains, "note_phone_view") as note, \
+                mock.patch.object(server.chains, "view", return_value=shown):
+            answer = await self.client.post("/chat/minions/view", json={"session": "child"}, headers=self.origin())
+        self.assertEqual(await answer.json(), {"chain": shown})
+        note.assert_called_once_with("child")
+
+    async def test_end_or_keep_requires_a_waiting_request(self):
+        with mock.patch.object(server.chains, "decide_end", return_value=True) as decide:
+            answer = await self.client.post("/chat/minions/decide", json={"session": "child", "decision": "keep"},
+                                            headers=self.origin())
+        self.assertEqual(await answer.json(), {"ok": True})
+        decide.assert_called_once_with("child", "keep")
+
+        with mock.patch.object(server.chains, "decide_end", return_value=True), \
+                mock.patch.object(server.minions, "end_session", return_value=0) as ended:
+            answer = await self.client.post("/chat/minions/decide", json={"session": "child", "decision": "end"},
+                                            headers=self.origin())
+        self.assertEqual(await answer.json(), {"ok": True})
+        ended.assert_called_once_with("child", force=True)
 
 
 class ToAgent(unittest.TestCase):

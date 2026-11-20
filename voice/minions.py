@@ -133,7 +133,7 @@ def deploy(args: list[str], caller) -> int:
                   "From a deploy, in " + match.name + ". It runs commands without asking; "
                   "`tmux attach -t henchline` to watch.")
     chains.append(chain, "launch", parent=boss.session, pane=tab.address, pid=pid, depth=depth + 1,
-                  agent=agent, where=match.name)
+                  agent=agent, where=match.name, ask=ask)
     log(HANDSFREE_LOG, f"deployed {agent} in {match.name} (tmux {tab.address})")
     print(f"deployed {agent} in {match.name} (tmux {tab.address})")
     return 0
@@ -149,11 +149,27 @@ def _still_asking(tab: Tab, agent: str) -> bool:
     return words in shown
 
 
-def _boss(session: str) -> Speaker | None:
-    found = Speaker.load(SPEAKERS / f"{session}.json")
+def _speaker(session: str) -> Speaker | None:
+    names = chains.aliases(session)
+    preferred = chains.canonical(session)
+    found = Speaker.load(SPEAKERS / f"{preferred}.json")
     if found:
         return found
-    return next((s for s in recent_speakers() if s.session == session), None)
+    # A discovered folder key is replaced by the real chat id once that boss speaks. Its old speaker file is
+    # deliberately removed, so reports must follow the same rename as the phone's chat. The newest live alias is
+    # the canonical one when a short rename transition leaves both files present.
+    live = [speaker for speaker in recent_speakers() if speaker.session in names]
+    if live:
+        return max(live, key=lambda speaker: speaker.at)
+    for name in names:
+        found = Speaker.load(SPEAKERS / f"{name}.json")
+        if found:
+            return found
+    return None
+
+
+def _boss(session: str) -> Speaker | None:
+    return _speaker(session)
 
 
 def report(args: list[str], caller) -> int:
@@ -178,8 +194,9 @@ def report(args: list[str], caller) -> int:
     if target is None:
         print("the boss isn't a known agent yet, so the report was not typed")
         return 1
-    prior = chains.corrections_since(child.session)
-    body = words if not prior else "Corrections since the last report:\n" + "\n".join(prior) + "\n\n" + words
+    prior = chains.pending_corrections(child.session)
+    body = words if not prior else "Corrections since the last report:\n" + \
+        "\n".join(item["text"] for item in prior) + "\n\n" + words
     routing = _routing()
     # SCHEDULED so a failure isn't spoken into the room, and so this isn't the user answering the boss.
     # The text itself starts with the report marker, so it is typed as a report and not kept as a correction.
@@ -188,39 +205,38 @@ def report(args: list[str], caller) -> int:
         return 1
     chain = chains.chain_of(child.session)
     if chain:
-        chains.append(chain, "report", session=child.session, text=words)
-    chains.mark_reported(child.session)
+        chains.append(chain, "report", session=child.session, text=words, exact=True)
+    chains.mark_reported(child.session, prior)
     print("reported")
     return 0
 
 
 def _hand_up(session: str) -> bool:
     """Deliver unreported corrections to the boss before the pane is closed. False when they could not be delivered."""
-    prior = chains.corrections_since(session)
-    if not prior:
-        return True
-    target = _boss(chains.parent_of(session))
-    if target is None:
-        return False
-    body = "Corrections since the last report:\n" + "\n".join(prior)
-    routing = _routing()
-    if not routing.deliver(f"{chains.REPORT} {body}", routing.Heard.SCHEDULED, to=target):
-        return False
-    chains.mark_reported(session)
-    return True
+    for _ in range(3):
+        prior = chains.pending_corrections(session)
+        if not prior:
+            return True
+        target = _boss(chains.parent_of(session))
+        if target is None:
+            return False
+        body = "Corrections since the last report:\n" + "\n".join(item["text"] for item in prior)
+        routing = _routing()
+        if not routing.deliver(f"{chains.REPORT} {body}", routing.Heard.SCHEDULED, to=target):
+            return False
+        chains.mark_reported(session, prior)
+    return not chains.pending_corrections(session)
 
 
-def end(args: list[str]) -> int:
+def end_session(session: str, *, force: bool = False) -> int:
     """End that one session's pane, when it is one started here (the same rule as ending a chat from the phone).
 
     Siblings stay. The old id is not resumed.
     """
-    if len(args) != 1 or not args[0].strip():
-        print("usage: handsfree end SESSION")
-        return 1
-    session = args[0].strip()
     from voice.desktop import tmux
-    target = next((s for s in recent_speakers() if s.session == session), None)
+    session = chains.canonical(session)
+    names = chains.aliases(session)
+    target = _speaker(session)
     if target and target.tab:
         tab = target.tab
     else:
@@ -234,23 +250,45 @@ def end(args: list[str]) -> int:
         print("only an agent started from here can be ended, and only that one")
         return 1
     from voice.state import LAST, last_speaker
-    # The user is in this chat: the boss does not close it out from under them.
+    # A child with the user in it or unreported words waits for an explicit phone choice.
     current = last_speaker()
-    if current and current.session == session:
-        print("the user is in that chat, so it was not ended")
-        return 1
+    reasons = []
+    if (current and current.session in names) or chains.phone_viewing(session):
+        reasons.append("open")
+    if chains.corrections_since(session):
+        reasons.append("words")
+    if reasons and not force:
+        chain = chains.chain_of(session)
+        if not chain:
+            print("that is not a delegated chat, so it was not ended")
+            return 1
+        if not chains.pending_end(session):
+            chains.append(chain, "end_requested", session=session, pane=tab.address,
+                          pid=int(target.pid or 0) if target else 0, reason=",".join(reasons))
+        print("waiting for the phone: End or Keep")
+        return 0
     pid = int(target.pid or 0) if target else 0
-    if not _hand_up(session):
-        print("the user's words were not delivered to the boss, so it was not ended")
-        return 1
-    if not tmux.end(tab):
-        print("couldn't end that pane")
+    # A delivery and its correction journal line hold the same lock as this final check and pane close. If words
+    # landed just after a hand-up, release the lock, hand that exact new snapshot up, and try the close again.
+    for _ in range(4):
+        if not _hand_up(session):
+            print("the user's words were not delivered to the boss, so it was not ended")
+            return 1
+        with chains.close_guard(session) as clear:
+            if not clear:
+                continue
+            if not tmux.end(tab):
+                print("couldn't end that pane")
+                return 1
+            break
+    else:
+        print("new words kept arriving, so the pane was not ended")
         return 1
     server.spawned(lambda alive: [e for e in alive if e.get("pane") != tab.address])
     chains.close_child(session, tab.address, pid)
     # The next hands-free turn must not resume this id. Follow the boss when we know them.
     followed = last_speaker()
-    if followed and followed.session == session:
+    if followed and followed.session in names:
         boss = _boss(chains.parent_of(session))
         if boss:
             boss.save(LAST)
@@ -260,10 +298,18 @@ def end(args: list[str]) -> int:
     for other in (Speaker.load(path) for path in SPEAKERS.glob("*.json")):
         if not other:
             continue
-        same = other.session == session or (
+        same = other.session in names or (
             other.tab.address == tab.address and other.tab.owner == tmux.OWNER and (not agent or other.agent == agent))
         if same:
             (SPEAKERS / f"{other.session}.json").unlink(missing_ok=True)
     log(HANDSFREE_LOG, f"ended {session} (tmux {tab.address})")
     print(f"ended {session}")
     return 0
+
+
+def end(args: list[str]) -> int:
+    """Command-line wrapper for ending one delegated session."""
+    if len(args) != 1 or not args[0].strip():
+        print("usage: handsfree end SESSION")
+        return 1
+    return end_session(args[0].strip())

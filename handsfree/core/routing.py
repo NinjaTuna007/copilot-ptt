@@ -771,19 +771,21 @@ def deliver_words(text: str, heard: Heard, to: Speaker | None = None, urgent: bo
                 start = 0
             taken = lambda: pickup.cursor_took(record, wanted, start)  # noqa: E731
     terminals = desktop().terminals
-    # Only tmux's typing takes "again" (other terminals' type_line has just the words)
-    typed = terminals.type_line(tab, message, again=again, taken=taken) if again else terminals.type_line(tab, message)
+    # A child's successful type and its correction journal line share the close lock. Ending either sees and
+    # reports these words, or closes first and makes type_line fail: there is no accepted-but-unreported gap.
+    with chains.delivery_guard(speaker.session, tab.address, speaker.pid) as remember:
+        # Only tmux's typing takes "again" (other terminals' type_line has just the words)
+        typed = terminals.type_line(tab, message, again=again, taken=taken) if again else terminals.type_line(tab, message)
+        if typed and remember:
+            remember(text)
     if not typed:
         log(HANDSFREE_LOG, f"typing into {tab.address} failed")
         refuse("I heard you, but that terminal is gone.")
         return False
     log(HANDSFREE_LOG, f"sent to {speaker.agent} {tab.address}" + (" (enter until the queue is clear)" if again else ""))
-    # The user's words to a child are kept for its next report. Not typed to the boss, and a report is not one of them.
-    chains.note_correction(speaker.session, text, tab.address, speaker.pid)
     if not report:
         Sent(speaker.agent, heard.value, session=speaker.session, words=text if in_call() else "").save()
     if not command:
         introduced(speaker, heard)
         told_on_call(speaker, heard)
     return True
-

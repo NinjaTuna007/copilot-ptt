@@ -10,6 +10,7 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -61,6 +62,8 @@ class MainActivity : Activity() {
     private var stayOn = true  // a call stays up while the agent works; check-on-me is for a wake-up or when an answer is needed
     private var cutIn: Boolean? = null  // null: Cursor cuts in, Claude and Codex let it wait
     private var current = ""  // the chat shown: texts and voice messages go to its agent
+    private val drafts = HashMap<String, String>()  // a half-written message belongs to the chat where it was written
+    private var keepChatAtBottom = true
     // The call and the chats are apart, as a messaging app's (the user's wish, 2026-11-16): the call is with callSession;
     // any other chat can be read and texted meanwhile, and a bar leads back to the call
     private var callSession = ""
@@ -318,9 +321,8 @@ class MainActivity : Activity() {
         sheet = Sheet(this, uris, uris.map { Files.nameOf(this, it) }, "", crew, current, over = true, note0 = words,
             onSent = { to ->  // off a call, the chat follows where it went (on one, the laptop says who's current)
                 if (!CallService.Bus.connected && to != current) {
-                    current = to
-                    prefs().edit().putString("current", current).putString("current_name", names[current] ?: "").apply()
-                    showHistory(); showCrew()
+                    switchChat(to)
+                    showCrew()
                 }
             }, onClosed = { showHistory() }).also { it.show() }  // closed: what came meanwhile is read now
     }
@@ -748,9 +750,7 @@ class MainActivity : Activity() {
             callSession = now
             followRing = false
             if (following && now != current) {
-                current = now
-                prefs().edit().putString("current", current).putString("current_name", names[current] ?: "").apply()
-                showHistory()
+                switchChat(now)
             }
         }
         showConnected(onCall())
@@ -775,7 +775,8 @@ class MainActivity : Activity() {
             })
         }
         class Chat(val session: String, val agent: String, val project: String, val last: JSONObject?, val found: String)
-        fun project(name: String) = name.substringAfter(", ", "").removePrefix("in ").ifEmpty { "home" }
+        fun project(name: String) =
+            name.substringAfter(", ", "").removePrefix("in ").substringBefore(" · ").ifEmpty { "home" }
         var chats = names.map { (session, name) -> Chat(session, name.substringBefore(","), project(name), Chats.last(this, session), "") }
         // Chats an agent texted lately that the laptop's crew list doesn't name: named from the session ("cursor-_tmp");
         // older ones stay out of the list (long-press clears one that's in it). Not hands-free's own: it is the
@@ -889,13 +890,21 @@ class MainActivity : Activity() {
      *  drops. The button follows the finger, so it feels like something is happening. The laptop transcribes the
      *  message and types it to this chat's agent. */
     private fun setUpVoiceNotes() {
-        val swap = { if (voiceNote == null) send.setImageResource(if (micMode()) R.drawable.ic_mic else R.drawable.ic_send) }
         text.addTextChangedListener(object : android.text.TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {
+                keepChatAtBottom = !chatScroll.canScrollVertically(1)
+            }
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
-            override fun afterTextChanged(s: android.text.Editable?) = swap()
+            override fun afterTextChanged(s: android.text.Editable?) {
+                if (current.isNotEmpty()) {
+                    val words = s?.toString().orEmpty()
+                    if (words.isEmpty()) drafts.remove(current) else drafts[current] = words
+                }
+                refreshSendAction()
+                if (keepChatAtBottom) chatScroll.post { chatScroll.fullScroll(View.FOCUS_DOWN) }
+            }
         })
-        swap()
+        refreshSendAction()
         send.setOnTouchListener { _, event ->
             if (!micMode() && voiceNote == null) return@setOnTouchListener sendTouch(event)  // a tap sends; held, sends now
             if (locked) {  // the button is "send" now, for a new tap: the finger that locked it lifting is not one
@@ -927,6 +936,13 @@ class MainActivity : Activity() {
 
     private fun micMode() = !onCall() && text.text.isNullOrBlank()
 
+    private fun refreshSendAction() {
+        if (voiceNote != null) return
+        val microphone = micMode()
+        send.setImageResource(if (microphone) R.drawable.ic_mic else R.drawable.ic_send)
+        send.contentDescription = if (microphone) "Hold to record a voice message" else "Send message"
+    }
+
     private fun startVoiceNote() {
         if (current.isEmpty() || voiceNote != null) return
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
@@ -936,6 +952,7 @@ class MainActivity : Activity() {
         val note = VoiceNote()
         if (!note.start()) { say("", "The microphone is busy.", note = true); return }
         voiceNote = note
+        send.contentDescription = "Recording a voice message"
         send.backgroundTintList = android.content.res.ColorStateList.valueOf(0xFFE24A4A.toInt())  // red while recording
         send.animate().scaleX(1.5f).scaleY(1.5f).setDuration(160).setInterpolator(android.view.animation.OvershootInterpolator()).start()
         send.performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
@@ -983,6 +1000,7 @@ class MainActivity : Activity() {
         send.animate().translationX(0f).translationY(0f).scaleX(1f).scaleY(1f).setDuration(200)
             .setInterpolator(android.view.animation.OvershootInterpolator()).start()
         send.setImageResource(R.drawable.ic_send)
+        send.contentDescription = "Send the voice message"
         attach.setImageResource(R.drawable.ic_close)
         attach.contentDescription = "Drop the voice message"
         send.performHapticFeedback(if (android.os.Build.VERSION.SDK_INT >= 30) android.view.HapticFeedbackConstants.CONFIRM else android.view.HapticFeedbackConstants.VIRTUAL_KEY)
@@ -1431,7 +1449,7 @@ class MainActivity : Activity() {
         text.isEnabled = typing
         send.isEnabled = typing
         attach.isEnabled = typing
-        send.setImageResource(if (micMode()) R.drawable.ic_mic else R.drawable.ic_send)  // off a call, empty: voice
+        refreshSendAction()  // off a call, empty: voice
         val name = names[current] ?: prefs().getString("current_name", "")?.ifEmpty { null }
         text.hint = if (on) "Message your crew…" else "Text ${name?.substringBefore(",") ?: "this agent"}…"
         // Off a call there is nothing to hold or type to: just the henchman and how to call
@@ -1543,7 +1561,12 @@ class MainActivity : Activity() {
     private fun pollWorking() {
         val session = current
         if (session.isEmpty() || Files.origin(this) == null) return
-        if (workingOf != session) { workingOf = session; showWorking(null); showWorkingBubble("", "") }
+        if (workingOf != session) {
+            workingOf = session; showWorking(null); showWorkingBubble("", ""); showMinionStrip(null)
+        }
+        // This is also the phone-open heartbeat for a delegated child. Ask independently: working status may wait
+        // behind a busy agent for up to a minute, while end safety needs this refresh every few seconds.
+        pollMinions(session)
         ask("/chat/working?session=" + android.net.Uri.encode(session), null) { answer ->
             if (session != current || chatScreen.visibility != View.VISIBLE) return@ask
             showWorking(if (answer.isNull("working")) null else answer.optBoolean("working"))
@@ -1556,6 +1579,142 @@ class MainActivity : Activity() {
             }
             showWorkingBubble(answer.optString("doing"), answer.optString("label"))
             showWorkflowStrip(answer.optJSONObject("workflow"))
+        }
+    }
+
+    // --- Delegated agents: the boss's live children and their hand-offs -------------------------------------------
+
+    private var minionRow: View? = null
+    private var minionRows: LinearLayout? = null
+    private var minionTitle: TextView? = null
+    private var minionChain: JSONObject? = null
+    private var decidingMinion = ""
+
+    private fun pollMinions(session: String) {
+        ask("/chat/minions/view", JSONObject().put("session", session)) { answer ->
+            if (session != current || chatScreen.visibility != View.VISIBLE) return@ask
+            val chain = answer.optJSONObject("chain")
+            showMinionStrip(chain)
+            maybeOfferMinionEnd(chain)
+        }
+    }
+
+    /** The boss chat's compact crew card. A child row opens that chat; the card's heading opens all hand-offs. */
+    private fun showMinionStrip(chain: JSONObject?) {
+        minionChain = chain
+        val minions = chain?.optJSONArray("minions")
+        if (chain == null || !chain.optBoolean("is_boss") || minions == null || minions.length() == 0) {
+            minionRow?.let { (it.parent as? android.view.ViewGroup)?.removeView(it) }
+            minionRow = null; minionRows = null; minionTitle = null
+            return
+        }
+        if (minionRow == null) {
+            val card = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setBackgroundResource(R.drawable.bubble_agent)
+                setPadding(dp(14), dp(10), dp(14), dp(12))
+            }
+            minionTitle = TextView(this).apply {
+                setTextColor(getColor(R.color.text)); textSize = 15f
+                typeface = android.graphics.Typeface.DEFAULT_BOLD
+                minimumHeight = dp(48); gravity = Gravity.CENTER_VERTICAL; isFocusable = true
+                TypedValue().also { value ->
+                    if (theme.resolveAttribute(android.R.attr.selectableItemBackground, value, true)) setBackgroundResource(value.resourceId)
+                }
+                setOnClickListener { showMinions() }
+            }
+            minionRows = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            card.addView(minionTitle)
+            card.addView(minionRows, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(6) })
+            minionRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL; gravity = Gravity.START or Gravity.BOTTOM
+                setPadding(0, dp(4), 0, dp(4))
+                addView(ImageView(this@MainActivity).apply { setImageResource(avatarOf(current)) },
+                    LinearLayout.LayoutParams(dp(28), dp(28)).apply { marginEnd = dp(8) })
+                addView(card, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            }
+        }
+        minionTitle?.apply {
+            text = "Delegated agents · ${chain.optInt("used")}/${chain.optInt("slots")} slots  ›"
+            contentDescription = "Delegated agents, ${chain.optInt("used")} of ${chain.optInt("slots")} slots. Open hand-offs"
+        }
+        minionRows?.removeAllViews()
+        for (i in 0 until minions.length()) {
+            val item = minions.getJSONObject(i)
+            val child = item.optString("session")
+            val title = listOf(item.optString("agent").replaceFirstChar { it.uppercase() },
+                item.optString("where").replace("_", " ")).filter { it.isNotEmpty() }.joinToString(" · ")
+            val detail = when {
+                item.has("end_waiting") -> "Waiting for End or Keep"
+                item.optString("state") == "ended" -> "Ended"
+                child.isEmpty() -> "Starting…"
+                else -> "Working · tap to open"
+            }
+            minionRows?.addView(LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, dp(5), 0, dp(5)); minimumHeight = dp(48); isEnabled = child.isNotEmpty(); isFocusable = true
+                contentDescription = "$title. $detail"
+                TypedValue().also { value ->
+                    if (child.isNotEmpty() && theme.resolveAttribute(android.R.attr.selectableItemBackground, value, true)) {
+                        setBackgroundResource(value.resourceId)
+                    }
+                }
+                addView(ImageView(this@MainActivity).apply { setImageResource(avatarOf(item.optString("agent"))) },
+                    LinearLayout.LayoutParams(dp(26), dp(26)).apply { marginEnd = dp(8) })
+                addView(LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(TextView(this@MainActivity).apply { text = title; setTextColor(getColor(R.color.text)); textSize = 14f })
+                    addView(TextView(this@MainActivity).apply { text = detail; setTextColor(getColor(R.color.muted)); textSize = 12f })
+                }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+                if (child.isNotEmpty()) setOnClickListener { open(child) }
+            })
+        }
+        val row = minionRow!!
+        val anchors = listOfNotNull(flowRow, workingRow).filter { it.parent === chat }
+        val at = anchors.minOfOrNull { chat.indexOfChild(it) } ?: chat.childCount
+        if (row.parent !== chat || chat.indexOfChild(row) != at - (if (row.parent === chat && chat.indexOfChild(row) < at) 1 else 0)) {
+            (row.parent as? android.view.ViewGroup)?.removeView(row)
+            val freshAt = listOfNotNull(flowRow, workingRow).filter { it.parent === chat }
+                .minOfOrNull { chat.indexOfChild(it) } ?: chat.childCount
+            chat.addView(row, freshAt, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT))
+            chatScroll.post { chatScroll.fullScroll(View.FOCUS_DOWN) }
+        }
+    }
+
+    private fun showMinions() {
+        val chain = minionChain ?: return
+        panel = MinionSheet(this, chain,
+            onOpen = { session -> open(session) },
+            onDecide = { session, decision -> decideMinion(session, decision) }).also { it.show() }
+    }
+
+    private fun maybeOfferMinionEnd(chain: JSONObject?) {
+        val items = chain?.optJSONArray("minions") ?: return
+        for (i in 0 until items.length()) {
+            val item = items.getJSONObject(i)
+            val waiting = item.optJSONObject("end_waiting") ?: continue
+            val child = item.optString("session")
+            if (child.isEmpty() || waiting.optDouble("at") <= 0 || decidingMinion.isNotEmpty() || BottomPanel.top() != null) return
+            panel = MinionEndSheet(this, item) { decision -> decideMinion(child, decision) }.also { it.show() }
+            return
+        }
+    }
+
+    private fun decideMinion(session: String, decision: String) {
+        if (decidingMinion.isNotEmpty()) return
+        decidingMinion = session
+        ask("/chat/minions/decide", JSONObject().put("session", session).put("decision", decision)) { answer ->
+            decidingMinion = ""
+            val ok = answer.optBoolean("ok")
+            android.widget.Toast.makeText(this, if (ok) {
+                if (decision == "end") "Ended" else "Kept"
+            } else answer.optString("note").ifEmpty { "No change" }, android.widget.Toast.LENGTH_LONG).show()
+            if (ok && decision == "end" && current == session) {
+                val boss = minionChain?.optString("boss").orEmpty()
+                if (boss.isNotEmpty()) open(boss)
+            } else if (current.isNotEmpty()) pollMinions(current)
         }
     }
 
@@ -1789,7 +1948,7 @@ class MainActivity : Activity() {
      *  a thought bubble beside the speech ones). Only thoughts after its last kept line, then each new one. */
     private fun pollThoughts() {
         val session = current
-        if (!session.matches(Regex("(cursor|claude)-[0-9a-f-]{36}")) || !prefs().getBoolean("thoughts", true)) return
+        if (!session.matches(Regex("(cursor|claude|codex)-[0-9a-f-]{36}")) || !prefs().getBoolean("thoughts", true)) return
         if (Files.origin(this) == null) return
         if (thoughtsOf != session) {
             thoughtsOf = session
@@ -2231,12 +2390,23 @@ class MainActivity : Activity() {
 
     /** Into an agent's chat from the list: on a call the laptop switches to it (and says so); off one, its chat
      *  is shown and texts go to it. */
+    private fun switchChat(session: String) {
+        if (session == current) return
+        if (current.isNotEmpty()) {
+            val words = text.text?.toString().orEmpty()
+            if (words.isEmpty()) drafts.remove(current) else drafts[current] = words
+        }
+        current = session
+        text.setText(drafts[current].orEmpty())
+        text.setSelection(text.text?.length ?: 0)
+        prefs().edit().putString("current", current).putString("current_name", names[current] ?: "").apply()
+        showHistory()
+    }
+
     private fun open(session: String) {
         if (session != current) {  // a chat, not the call: on a call this doesn't switch it (the call bar leads back)
             stopSelecting()
-            current = session
-            prefs().edit().putString("current", current).putString("current_name", names[current] ?: "").apply()
-            showHistory()
+            switchChat(session)
         }
         showConnected(onCall())
         showCrew()
@@ -2778,6 +2948,7 @@ class MainActivity : Activity() {
             val new = moves.optString(old)
             if (new.isEmpty() || new == old) continue
             if (Chats.merge(this, old, new)) { Media.rename(this, old, new); moved = true }
+            drafts.remove(old)?.let { if (new !in drafts) drafts[new] = it }
             if (current == old) { current = new; prefs().edit().putString("current", new).apply(); moved = true }
             if (callSession == old) callSession = new
         }

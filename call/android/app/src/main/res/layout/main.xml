@@ -554,11 +554,16 @@
                 android:layout_height="wrap_content"
                 android:background="@android:color/transparent"
                 android:enabled="false"
+                android:gravity="top|start"
                 android:hint="Message your crew…"
-                android:imeOptions="actionSend"
-                android:inputType="textCapSentences"
+                android:imeOptions="actionNone"
+                android:inputType="textCapSentences|textMultiLine"
+                android:maxLines="6"
                 android:minHeight="48dp"
+                android:minLines="1"
                 android:paddingHorizontal="12dp"
+                android:paddingVertical="12dp"
+                android:scrollbars="vertical"
                 android:textColor="@color/text"
                 android:textColorHint="@color/muted" />
 

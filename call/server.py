@@ -40,7 +40,7 @@ HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(HERE.parent), str(HERE.parent / "handsfree/core")]  # voice/, and hands-free's routing
 import routing  # noqa: E402
 from routing import Heard  # noqa: E402
-from voice import commands, cursor_cli, files, pickup, plans, reminders, snaps, spool, screenshot, usage, voices, workflows  # noqa: E402
+from voice import chains, commands, cursor_cli, files, minions, pickup, plans, reminders, snaps, spool, screenshot, usage, voices, workflows  # noqa: E402
 from voice.agents import AGENT_VOICES, DEFAULT_VOICE  # noqa: E402
 from voice.desktop import current as desktop, cursor_bridge, tmux  # noqa: E402
 from voice.state import (AWAY, RENAMED, BY_HANDSFREE, CALL, CALL_BUTTON_ONLY, CALL_SILENT, CALL_STAY_ON, CALL_HANGUP, CALL_MIRROR, CALL_ORIGIN,  # noqa: E402
@@ -930,6 +930,53 @@ async def chat_workflows(request: web.Request) -> web.Response:
     return web.json_response({"runs": found})
 
 
+async def chat_minions(request: web.Request) -> web.Response:
+    """The delegated job containing this chat, shaped for its strip and hand-off sheet."""
+    trusted(request)
+    session = request.query.get("session", "")
+    found = await asyncio.get_running_loop().run_in_executor(None, chains.view, session)
+    return web.json_response({"chain": found or None})
+
+
+async def chat_minion_view(request: web.Request) -> web.Response:
+    """Refresh the chat the phone is visibly showing and return its delegated job."""
+    trusted(request)
+    try:
+        session = str((await request.json()).get("session", "")).strip()
+    except (ValueError, AttributeError):
+        raise web.HTTPBadRequest(text="expected JSON")
+    if not session:
+        return web.json_response({"note": "No chat named."}, status=400)
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, chains.note_phone_view, session)
+    found = await loop.run_in_executor(None, chains.view, session)
+    return web.json_response({"chain": found or None})
+
+
+async def chat_minion_decide(request: web.Request) -> web.Response:
+    """Answer an end request without discarding words typed into that child."""
+    trusted(request)
+    try:
+        body = await request.json()
+        session = str(body.get("session", "")).strip()
+        decision = str(body.get("decision", "")).strip().lower()
+    except (ValueError, AttributeError):
+        raise web.HTTPBadRequest(text="expected JSON")
+    if not session or decision not in ("end", "keep"):
+        return web.json_response({"note": "Choose End or Keep for one delegated chat."}, status=400)
+    loop = asyncio.get_running_loop()
+    claimed = await loop.run_in_executor(None, chains.decide_end, session, decision)
+    if not claimed:
+        return web.json_response({"note": "That end request is no longer waiting."}, status=409)
+    if decision == "keep":
+        return web.json_response({"ok": True})
+    code = await loop.run_in_executor(None, lambda: minions.end_session(session, force=True))
+    if code:
+        await loop.run_in_executor(None, chains.restore_end, session, "end failed")
+        return web.json_response({"note": "That chat could not be ended; its words were kept."}, status=409)
+    return web.json_response({"ok": True})
+
+
 async def chat_plan(request: web.Request) -> web.Response:
     """The plan for the agent whose chat the phone shows: its steps and how many are done. {"note"} when it has none."""
     trusted(request)
@@ -1789,6 +1836,39 @@ def claude_thoughts(target: Speaker, since: str, most: int = 20) -> list[dict]:
     return found[-most:]
 
 
+def codex_thoughts(target: Speaker, since: str, most: int = 20) -> list[dict]:
+    """Explicit progress commentary from one session, never its encrypted reasoning or final answer."""
+    uuid = target.session.removeprefix("codex-")
+    if not re.fullmatch(r"[0-9a-f-]{36}", uuid):
+        return []
+    found = []
+    root = Path.home() / ".codex/sessions"
+    for log_file in root.rglob(f"*{uuid}.jsonl") if root.is_dir() else ():
+        try:
+            with log_file.open("rb") as handle:
+                handle.seek(max(0, log_file.stat().st_size - 2_000_000))
+                tail = handle.read().splitlines()
+        except OSError:
+            continue
+        for raw in tail:
+            try:
+                entry = json.loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(entry, dict) or entry.get("type") != "event_msg":
+                continue
+            payload = entry.get("payload")
+            at = str(entry.get("timestamp", ""))
+            if not isinstance(payload, dict) or payload.get("type") != "agent_message" or not at or at <= since:
+                continue
+            if payload.get("phase") != "commentary":
+                continue
+            words = str(payload.get("message") or "").strip()
+            if words:
+                found.append({"at": at, "text": words[:2000]})
+    return sorted(found, key=lambda item: item["at"])[-most:]
+
+
 async def chat_thoughts(request: web.Request) -> web.Response:
     """A Cursor IDE chat's thinking for the phone's thought bubbles (the user's wish, 2026-11-16): ?session=&since=
     (an ISO time); {"thoughts": [{at, text}]}, empty for any other agent."""
@@ -1802,7 +1882,9 @@ async def chat_thoughts(request: web.Request) -> web.Response:
         found = await loop.run_in_executor(None, cursor_bridge.thoughts, chat, since)
     elif target and target.agent == "claude":  # Claude keeps some of its thinking as text in its session log
         found = await loop.run_in_executor(None, claude_thoughts, target, since)
-    else:  # Codex keeps its reasoning encrypted: nothing to show
+    elif target and target.agent == "codex":
+        found = await loop.run_in_executor(None, codex_thoughts, target, since)
+    else:
         found = []
     return web.json_response({"thoughts": found})
 
@@ -2555,6 +2637,9 @@ def main() -> int:
     app.router.add_post("/crew/usage/tell", crew_usage_tell)
     app.router.add_get("/usage", usage_overview)
     app.router.add_get("/chat/workflows", chat_workflows)
+    app.router.add_get("/chat/minions", chat_minions)
+    app.router.add_post("/chat/minions/view", chat_minion_view)
+    app.router.add_post("/chat/minions/decide", chat_minion_decide)
     app.router.add_post("/away", away)
     app.router.add_get("/away", away_state)
     app.router.add_post("/ring-endpoint", ring_endpoint)

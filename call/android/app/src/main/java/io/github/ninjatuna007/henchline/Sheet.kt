@@ -10,6 +10,7 @@ import android.util.Size
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import android.view.animation.DecelerateInterpolator
 import android.view.inputmethod.EditorInfo
 import android.widget.Button
@@ -97,7 +98,8 @@ class Sheet(
                     setPadding(0, px(6), 0, 0)
                 })
                 addView(TextView(activity).apply {
-                    this.text = name.substringAfter(", ", ""); setTextColor(colour(R.color.muted)); textSize = 11f
+                    this.text = name.substringAfter(", ", "").removePrefix("in ").substringBefore(" · ")
+                    setTextColor(colour(R.color.muted)); textSize = 11f
                     gravity = Gravity.CENTER; maxLines = 1; ellipsize = TextUtils.TruncateAt.END; maxWidth = px(96)
                 })
                 setOnClickListener { picked = session; draw() }
@@ -109,7 +111,11 @@ class Sheet(
             hint = "Add a few words (optional)"; setText(note0); setHintTextColor(colour(R.color.muted)); setTextColor(colour(R.color.text))
             background = rounded(colour(R.color.navy), 16f, 1, colour(R.color.surface_high))
             setPadding(px(16), px(14), px(16), px(14)); textSize = 15f
-            imeOptions = EditorInfo.IME_ACTION_DONE; inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            gravity = Gravity.TOP or Gravity.START; minLines = 2; maxLines = 6
+            isSingleLine = false; setHorizontallyScrolling(false); isVerticalScrollBarEnabled = true
+            imeOptions = EditorInfo.IME_ACTION_NONE
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES or
+                android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
         }
         sheet.addView(note, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             .apply { topMargin = px(18) })
@@ -136,10 +142,33 @@ class Sheet(
         root.setOnClickListener { close() }
         if (over) activity.addContentView(root, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.MATCH_PARENT)) else activity.setContentView(root)
+        liftAboveKeyboard(root)
         this.root = root
         sheet.translationY = 800 * dp
         sheet.animate().translationY(0f).setDuration(280).setInterpolator(DecelerateInterpolator()).start()
         this.sheet = sheet
+    }
+
+    /** Keep the caption and its Send button above the IME, including edge-to-edge Android versions where the
+     * activity's resized content still draws under the keyboard. */
+    private fun liftAboveKeyboard(root: FrameLayout) {
+        val decor = activity.window.decorView
+        val lift = ViewTreeObserver.OnGlobalLayoutListener {
+            val insets = decor.rootWindowInsets ?: return@OnGlobalLayoutListener
+            val keyboard = if (android.os.Build.VERSION.SDK_INT >= 30)
+                insets.getInsets(android.view.WindowInsets.Type.ime() or android.view.WindowInsets.Type.navigationBars()).bottom
+                else @Suppress("DEPRECATION") insets.systemWindowInsetBottom
+            val at = IntArray(2).also { root.getLocationInWindow(it) }
+            val cover = maxOf(0, at[1] + root.height - (decor.height - keyboard))
+            if (root.paddingBottom != cover) root.setPadding(0, 0, 0, cover)
+        }
+        decor.viewTreeObserver.addOnGlobalLayoutListener(lift)
+        root.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(v: View) {}
+            override fun onViewDetachedFromWindow(v: View) {
+                decor.viewTreeObserver.removeOnGlobalLayoutListener(lift)
+            }
+        })
     }
 
     private var sheet: View? = null

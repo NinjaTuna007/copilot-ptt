@@ -6,7 +6,7 @@ knobs are max_depth 2 and slots 8 (live children, so an ended one frees a slot).
 
 The directory is voice.state.CHAINS, one ``<id>.jsonl`` per job. The first line
 is the chain (boss and knobs). After that the lines are launch, bound,
-correction, report, ended and replaced. A launch may only know the pane and its
+correction, report, end_requested, end_kept, ended and replaced. A launch may only know the pane and its
 pid; a bound line attaches the session once it exists. No topic, token or folder
 path is written. Corrections and reports are the words themselves.
 """
@@ -23,11 +23,12 @@ from dataclasses import dataclass, field
 
 from voice.state import CHAINS
 
-KINDS = ("launch", "bound", "correction", "report", "ended", "replaced")
+KINDS = ("launch", "bound", "correction", "report", "end_requested", "end_chosen", "end_kept", "ended", "replaced")
 DEFAULT_DEPTH = 2  # boss is 1, so a child is as deep as a chain allows
 DEFAULT_SLOTS = 8
 REPORT = "[henchline · report]"  # an internal report, not a correction from the user
 _LOCK = CHAINS.parent / "chains.lock"
+PHONE_VIEWS = CHAINS.parent / "chain-views.json"
 _DROP = {"topic", "token", "secret", "password", "folder", "path"}
 
 
@@ -86,7 +87,8 @@ def _load(path) -> _Chain | None:
     if not header or not header.get("id") or not header.get("boss"):
         return None
     boss = str(header["boss"])
-    closed = any(e.get("kind") == "ended" and str(e.get("session") or "") == boss for e in events)
+    boss_names = _renamed_as(boss)
+    closed = any(e.get("kind") == "ended" and str(e.get("session") or "") in boss_names for e in events)
     try:
         depth, slots = int(header.get("max_depth")), int(header.get("slots"))
     except (TypeError, ValueError):
@@ -151,6 +153,24 @@ def _renamed_as(session: str) -> set[str]:
     return names
 
 
+def _canonical(session: str) -> str:
+    """Follow forward renames to the key the phone and live speaker now use."""
+    from voice.state import RENAMED, read_json
+    try:
+        data = read_json(RENAMED)
+    except OSError:
+        data = {}
+    current = session
+    seen = set()
+    while isinstance(data, dict) and current not in seen:
+        seen.add(current)
+        following = str(data.get(current) or "")
+        if not following or following == current:
+            break
+        current = following
+    return current
+
+
 def _known_as(session: str) -> set[str]:
     """This session, the keys it was renamed to or from, and any key already written on the same live pane.
 
@@ -200,7 +220,7 @@ def _chain_of(session: str) -> _Chain | None:
         parents = _parents(chain)
         if any(name in parents for name in names):
             return chain
-        if chain.boss == session and not chain.closed:
+        if chain.boss in names and not chain.closed:
             as_boss = chain
     return as_boss
 
@@ -221,7 +241,8 @@ def _closes(later: dict, launch: dict) -> bool:
     """
     if later.get("kind") not in ("ended", "replaced"):
         return False
-    if str(launch.get("session") or "") and str(later.get("session") or "") == str(launch.get("session") or ""):
+    launched = str(launch.get("session") or "")
+    if launched and str(later.get("session") or "") in _renamed_as(launched):
         return True
     if not launch.get("pane") or str(later.get("pane") or "") != str(launch.get("pane") or ""):
         return False
@@ -299,7 +320,7 @@ def open(boss_session: str, *, max_depth: int = DEFAULT_DEPTH, slots: int = DEFA
         existing = _chain_of(boss_session)
         if parent and existing:
             return existing.id
-        if existing and existing.boss == boss_session:
+        if existing and existing.boss in _known_as(boss_session):
             return existing.id
         chain_id = secrets.token_hex(4)
         while (CHAINS / f"{chain_id}.jsonl").exists():
@@ -337,6 +358,8 @@ def append(chain: str, kind: str, **fields) -> None:
             clean.pop("max_depth", None)
             clean.pop("slots", None)
             clean.pop("may_deploy", None)
+        if kind == "correction" and not clean.get("correction"):
+            clean["correction"] = secrets.token_hex(8)
         if "pid" in clean:
             try:
                 clean["pid"] = int(clean["pid"])
@@ -357,7 +380,7 @@ def allow(chain: str, caller_session: str, depth: int) -> str:
             return "no such chain"
         if found.closed:
             return "that chain has ended"
-        if caller_session != found.boss:
+        if found.boss not in _renamed_as(caller_session):
             return "only the boss may deploy"
         try:
             here = int(depth)
@@ -376,6 +399,18 @@ def parent_of(session: str) -> str:
         return _parent_of(session)
 
 
+def aliases(session: str) -> set[str]:
+    """This session and every key renamed to or from it."""
+    with _locked():
+        return _renamed_as(session)
+
+
+def canonical(session: str) -> str:
+    """The current forward-renamed key for this session."""
+    with _locked():
+        return _canonical(session)
+
+
 def chain_of(session: str) -> str:
     """The job id this session belongs to, or ``""``."""
     with _locked():
@@ -387,9 +422,10 @@ def pane_of(session: str) -> str:
     """The tmux pane last recorded for this session, or ``""``."""
     found = ""
     with _locked():
+        names = _renamed_as(session)
         for chain in _load_all():
             for event in chain.events:
-                if str(event.get("session") or "") == session and event.get("pane") and event.get("kind") in (
+                if str(event.get("session") or "") in names and event.get("pane") and event.get("kind") in (
                         "launch", "bound", "ended"):
                     found = str(event["pane"])
     return found
@@ -398,6 +434,125 @@ def pane_of(session: str) -> str:
 def _launch_open(events: list[dict], index: int) -> bool:
     launch = events[index]
     return not any(_closes(later, launch) for later in events[index + 1:])
+
+
+def _same_launch_line(event: dict, launch: dict) -> bool:
+    """Whether a later line names this launch by its pane and process."""
+    pane = str(launch.get("pane") or "")
+    if not pane or str(event.get("pane") or "") != pane:
+        return False
+    return _same_pid(int(launch.get("pid") or 0), int(event.get("pid") or 0))
+
+
+def view(session: str) -> dict:
+    """One job as the phone may show it, including each child's ordered hand-offs."""
+    with _locked():
+        chain = _chain_of(session)
+        if not chain:
+            return {}
+        events = list(chain.events)
+        launches = [(index, event) for index, event in enumerate(events) if event.get("kind") == "launch"]
+        minions = []
+        timeline = []
+        for index, launch in launches:
+            later = []
+            for later_index, event in enumerate(events[index + 1:], start=index + 1):
+                later.append((later_index, event))
+                if _closes(event, launch):
+                    break
+            child = str(launch.get("session") or "")
+            for _, event in later:
+                if event.get("kind") == "bound" and _same_launch_line(event, launch):
+                    child = str(event.get("session") or child)
+            child = _canonical(child) if child else ""
+            names = _renamed_as(child) if child else set()
+
+            def belongs(event: dict) -> bool:
+                who = str(event.get("session") or "")
+                return bool(who and who in names) or _same_launch_line(event, launch)
+
+            handoffs = []
+            ask = str(launch.get("ask") or "").strip()
+            if ask:
+                item = {"kind": "ask", "text": ask, "at": launch.get("at", 0)}
+                handoffs.append(item)
+                timeline.append({**item, "order": index, "session": child,
+                                 "agent": str(launch.get("agent") or ""), "where": str(launch.get("where") or "")})
+            pending = None
+            for later_index, event in later:
+                if not belongs(event):
+                    continue
+                kind = str(event.get("kind") or "")
+                if kind in ("correction", "report") and str(event.get("text") or "").strip():
+                    item = {"kind": kind, "text": str(event["text"]).strip(), "at": event.get("at", 0)}
+                    handoffs.append(item)
+                    timeline.append({**item, "order": later_index, "session": child,
+                                     "agent": str(launch.get("agent") or ""), "where": str(launch.get("where") or "")})
+                if kind == "end_requested":
+                    pending = {"at": event.get("at", 0), "reason": str(event.get("reason") or "")}
+                elif kind in ("end_chosen", "end_kept", "ended", "replaced"):
+                    pending = None
+            minions.append({
+                "session": child,
+                "agent": str(launch.get("agent") or ""),
+                "where": str(launch.get("where") or ""),
+                "state": "running" if _launch_open(events, index) else "ended",
+                "handoffs": handoffs,
+                **({"end_waiting": pending} if pending else {}),
+            })
+        return {
+            "id": chain.id,
+            "boss": _canonical(chain.boss),
+            "is_boss": chain.boss in _renamed_as(session),
+            "used": _active(events),
+            "slots": chain.slots,
+            "minions": minions,
+            "handoffs": [{key: value for key, value in item.items() if key != "order"}
+                         for item in sorted(timeline, key=lambda item: item["order"])],
+        }
+
+
+def pending_end(session: str) -> bool:
+    """True when this child has an unanswered End-or-Keep request."""
+    shown = view(session)
+    names = aliases(session)
+    return any(item.get("session") in names and item.get("end_waiting") for item in shown.get("minions", []))
+
+
+def decide_end(session: str, decision: str) -> bool:
+    """Atomically claim one pending end request as End or Keep."""
+    if decision not in ("end", "keep"):
+        return False
+    with _locked():
+        found = _chain_of(session)
+        if not found:
+            return False
+        names = _known_as(session)
+        pending = False
+        for event in found.events:
+            if str(event.get("session") or "") not in names:
+                continue
+            if event.get("kind") == "end_requested":
+                pending = True
+            elif event.get("kind") in ("end_chosen", "end_kept", "ended", "replaced"):
+                pending = False
+        if not pending:
+            return False
+        _write(found.id, {"at": time.time(), "kind": "end_chosen" if decision == "end" else "end_kept",
+                          "session": session})
+        return True
+
+
+def restore_end(session: str, reason: str = "failed") -> None:
+    """Offer End or Keep again after a claimed End could not close the child safely."""
+    chain = chain_of(session)
+    if chain:
+        append(chain, "end_requested", session=session, reason=reason)
+
+
+def keep(session: str) -> bool:
+    """Compatibility wrapper for answering a pending end request with Keep."""
+    return decide_end(session, "keep")
 
 
 def bind(session: str, pane: str = "", pid: int = 0) -> str:
@@ -442,35 +597,133 @@ def bind(session: str, pane: str = "", pid: int = 0) -> str:
         return chain.boss
 
 
-def corrections_since(session: str) -> list[str]:
-    """Correction texts for this session that no report has included yet, oldest first."""
-    if not session:
-        return []
-    texts: list[str] = []
-    with _locked():
-        for chain in _load_all():
-            names = _known_as(session)
-            last = -1
-            for index, event in enumerate(chain.events):
-                if event.get("kind") == "report" and str(event.get("session") or "") in names:
-                    last = index
-            for index, event in enumerate(chain.events):
-                if index <= last or event.get("kind") != "correction" or str(event.get("session") or "") not in names:
-                    continue
+def _pending_corrections(session: str) -> list[dict]:
+    """Unacknowledged corrections. The caller holds the chain lock."""
+    pending: list[dict] = []
+    names = _known_as(session)
+    for chain in _load_all():
+        candidates: list[dict] = []
+        acknowledged: set[str] = set()
+        for index, event in enumerate(chain.events):
+            who = str(event.get("session") or "")
+            if who not in names:
+                continue
+            if event.get("kind") == "correction":
                 text = str(event.get("text") or "").strip()
                 if text:
-                    texts.append(text)
-    return texts
+                    candidates.append({"id": str(event.get("correction") or f"legacy:{index}"), "text": text})
+            elif event.get("kind") == "report":
+                if event.get("exact"):
+                    acknowledged.update(str(item) for item in event.get("corrections") or [])
+                else:  # lines written before exact watermarks acknowledged every earlier correction
+                    acknowledged.update(item["id"] for item in candidates)
+        pending.extend(item for item in candidates if item["id"] not in acknowledged)
+    return pending
 
 
-def mark_reported(session: str) -> None:
-    """Those corrections are in a report now. A later correction waits for the next one."""
+def pending_corrections(session: str) -> list[dict]:
+    """Unacknowledged corrections for this child, with stable ids, oldest first."""
     if not session:
+        return []
+    with _locked():
+        return _pending_corrections(session)
+
+
+def corrections_since(session: str) -> list[str]:
+    """Correction texts for this session that no report has included yet, oldest first."""
+    return [item["text"] for item in pending_corrections(session)]
+
+
+def mark_reported(session: str, corrections: list[dict]) -> None:
+    """Acknowledge exactly the correction snapshot that was delivered."""
+    ids = [str(item.get("id") or "") for item in corrections if str(item.get("id") or "")]
+    if not session or not ids:
         return
     with _locked():
         found = _chain_of(session)
     if found:
-        append(found.id, "report", session=session, mark=True)
+        append(found.id, "report", session=session, mark=True, exact=True, corrections=ids)
+
+
+def note_phone_view(session: str) -> None:
+    """Remember briefly that the phone is visibly showing this chat."""
+    if not session:
+        return
+    now = time.time()
+    with _locked():
+        try:
+            shown = json.loads(PHONE_VIEWS.read_text())
+        except (OSError, ValueError):
+            shown = {}
+        if not isinstance(shown, dict):
+            shown = {}
+        shown = {str(key): float(value) for key, value in shown.items()
+                 if isinstance(value, (int, float)) and now - float(value) < 60}
+        shown[session] = now
+        PHONE_VIEWS.parent.mkdir(parents=True, exist_ok=True)
+        temporary = PHONE_VIEWS.with_suffix(".tmp")
+        temporary.write_text(json.dumps(shown))
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, PHONE_VIEWS)
+
+
+def phone_viewing(session: str, stale: float = 8.0) -> bool:
+    """Whether the phone refreshed this chat recently enough to still be looking at it."""
+    if not session:
+        return False
+    with _locked():
+        try:
+            shown = json.loads(PHONE_VIEWS.read_text())
+        except (OSError, ValueError):
+            return False
+        names = _renamed_as(session)
+        now = time.time()
+        return isinstance(shown, dict) and any(
+            isinstance(shown.get(name), (int, float)) and now - float(shown[name]) <= stale for name in names)
+
+
+@contextmanager
+def delivery_guard(session: str, pane: str = "", pid: int = 0):
+    """Keep a child's terminal delivery and its correction line indivisible from closing that child.
+
+    The yielded callback records the words after type_line succeeds. It is None for an ordinary non-child
+    delivery. Binding happens first; if closing wins the following race, typing sees the dead pane and fails
+    instead of silently accepting words that no report could carry.
+    """
+    pane = str(pane or "")
+    try:
+        pid = int(pid or 0)
+    except (TypeError, ValueError):
+        pid = 0
+    if not session or not CHAINS.is_dir():
+        yield None
+        return
+    if pane or pid:
+        bind(session, pane, pid)
+    if not parent_of(session):
+        yield None
+        return
+    with _locked():
+        found = _chain_of(session)
+        if not found or not _parent_of(session):
+            yield None
+            return
+
+        def remember(text: str) -> None:
+            words = str(text or "").strip()
+            if not words or words.startswith(REPORT):
+                return
+            _write(found.id, {"at": time.time(), "kind": "correction", "session": session, "text": words,
+                              "pane": pane, "pid": pid, "correction": secrets.token_hex(8)})
+
+        yield remember
+
+
+@contextmanager
+def close_guard(session: str):
+    """Hold delivery out while the caller performs the final pending check and closes the pane."""
+    with _locked():
+        yield not _pending_corrections(session)
 
 
 def note_correction(session: str, text: str, pane: str = "", pid: int = 0) -> None:
