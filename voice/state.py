@@ -72,6 +72,7 @@ VOICE_NOTES = STATE / "voicenotes"
 CALL_TOLD = STATE / "call.told"  # a file per agent session already reminded, in this call, how to be on a call
 INTRODUCED = STATE / "introduced"  # a file per agent session already told, once, how phone messages work
 SPAWNED = STATE / "spawned.json"  # tmux panes of agents started from the phone: only these can be ended from it
+CHAINS = STATE / "chains"  # one append-only jsonl per deploy job (voice/chains.py): corrections and reports, never a secret
 CHAT_KEY = re.compile(r"-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")  # a Cursor chat's own key
 CALL_PINNED = STATE / "call.pinned"  # the agent picked on this call: another speaking doesn't take the call over
 # A voice message not yet typed after this long is dropped, never typed late: the phone stops waiting at 180 s

@@ -648,6 +648,10 @@ def is_command(text: str, speaker: Speaker | None) -> bool:
 def deliver(text: str, heard: Heard, to: Speaker | None = None, urgent: bool = False) -> bool:
     """`deliver_words`, with the photos the user took on the call screen since the last turn going along with these
     words (a spoken or typed turn on a call; a command, a text or a share carries none). Put back if not delivered."""
+    from voice import chains
+    # A child's report is not the user's turn: no call photos, and it does not move the pinned call.
+    if text.lstrip().startswith(chains.REPORT):
+        return deliver_words(text, heard, to, urgent)
     speaker = to or last_speaker()
     if not in_call() or heard in PHONE or heard is Heard.SCHEDULED or speaker is None or is_command(text, speaker):
         return deliver_words(text, heard, to, urgent)
@@ -666,12 +670,15 @@ def deliver_words(text: str, heard: Heard, to: Speaker | None = None, urgent: bo
     can't, says why out loud and leaves the reason in why_not(), for the phone to show too. urgent: the phone's
     "send now" (held send button): the agent's work is interrupted first, so the words reach it at once instead of
     waiting in its queue (Escape in a terminal; in a Cursor chat, Enter again, which sends a queued message now)."""
+    from voice import chains
     _why.words = ""
-    _why.quiet = heard is Heard.SCHEDULED  # nobody is there to hear why: retried later by the call server
+    # A report is typed as itself (it already carries its marker). A failure isn't spoken: nobody in the room asked.
+    report = bool(text) and str(text).lstrip().startswith(chains.REPORT)
+    _why.quiet = heard is Heard.SCHEDULED or report  # a scheduled message is retried later by the call server
     speaker = to or last_speaker()
     # A slash command ("/compact", "/rename …") is typed exactly as it is: an agent runs a line as a command only
     # when it starts with "/", so no tag, introduction or call note in front of it (none of those is then given)
-    command = is_command(text, speaker)
+    command = report or is_command(text, speaker)
     message = text.strip() if command \
         else f"{heard.tag} {introduce(speaker, heard)}{on_a_call(speaker, heard)}{text}{extra}"
     if speaker is None:
@@ -699,7 +706,8 @@ def deliver_words(text: str, heard: Heard, to: Speaker | None = None, urgent: bo
             if why:
                 refuse(f"Cursor didn't take that: {why}.")
                 return False
-            Sent(speaker.agent, heard.value, session=speaker.session, words=text if in_call() else "").save()
+            if not report:  # a child's report is not the user answering, and not a line in the call chat
+                Sent(speaker.agent, heard.value, session=speaker.session, words=text if in_call() else "").save()
             if not command:
                 introduced(speaker, heard)
                 told_on_call(speaker, heard)
@@ -718,11 +726,11 @@ def deliver_words(text: str, heard: Heard, to: Speaker | None = None, urgent: bo
         ok = subprocess.run([sys.executable, str(Path(__file__).resolve().parents[1] / "handsfree.py"),
                              "type-into-cursor", wid, message], timeout=20).returncode == 0
         log(HANDSFREE_LOG, f"sent to cursor window {speaker.where}" if ok else "Cursor delivery failed")
-        if ok:
+        if ok and not report:
             Sent(speaker.agent, heard.value, session=speaker.session, words=text if in_call() else "").save()
-            if not command:
-                introduced(speaker, heard)
-                told_on_call(speaker, heard)
+        if ok and not command:
+            introduced(speaker, heard)
+            told_on_call(speaker, heard)
         if not ok and desktop().locked():
             refuse("The laptop's screen is locked, so I can't type into Cursor. "
                    "Agents in a terminal still get your words.")
@@ -770,7 +778,10 @@ def deliver_words(text: str, heard: Heard, to: Speaker | None = None, urgent: bo
         refuse("I heard you, but that terminal is gone.")
         return False
     log(HANDSFREE_LOG, f"sent to {speaker.agent} {tab.address}" + (" (enter until the queue is clear)" if again else ""))
-    Sent(speaker.agent, heard.value, session=speaker.session, words=text if in_call() else "").save()
+    # The user's words to a child are kept for its next report. Not typed to the boss, and a report is not one of them.
+    chains.note_correction(speaker.session, text, tab.address, speaker.pid)
+    if not report:
+        Sent(speaker.agent, heard.value, session=speaker.session, words=text if in_call() else "").save()
     if not command:
         introduced(speaker, heard)
         told_on_call(speaker, heard)

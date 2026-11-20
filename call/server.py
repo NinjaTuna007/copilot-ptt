@@ -648,6 +648,35 @@ def spawned(change=None) -> list[str]:
         return [str(e["pane"]) for e in alive]
 
 
+def owns(pane: str, pid: int = 0) -> bool:
+    """That pane is one we started, and the caller names that same process.
+
+    A pid of 0 does not match. The pane id is reused, and ending on the id alone
+    would kill whoever is there now. If tmux cannot be asked, the saved pid is not
+    proof either: the pane may already be a new process.
+    """
+    try:
+        pid = int(pid or 0)
+    except (TypeError, ValueError):
+        pid = 0
+    if not pid:
+        return False
+    with SPAWNED_LOCK:
+        kept = [e for e in read_json(SPAWNED).get("panes", []) if isinstance(e, dict) and e.get("pid")]
+        panes = tmux.pane_pids()
+        if panes is None:
+            return False
+        alive = [e for e in kept if panes.get(str(e.get("pane"))) == e["pid"]]
+        if alive != kept:
+            write_json(SPAWNED, {"panes": alive}, private=True)
+    for entry in alive:
+        if str(entry.get("pane")) != pane:
+            continue
+        if int(entry.get("pid") or 0) == pid:
+            return True
+    return False
+
+
 def trusted_folders() -> list[Path]:
     """Where a new chat can start: folders Claude Code already trusts (its own trust prompt would otherwise be the
     first thing the phone's words answer), that still exist, most recently used first."""
@@ -2002,11 +2031,16 @@ async def crew_end(request: web.Request) -> web.Response:
     except (ValueError, AttributeError):
         raise web.HTTPBadRequest(text="expected JSON")
     target = next((s for s in recent_speakers() if s.session == session), None)
-    if target is None or target.tab.owner != tmux.OWNER or target.tab.address not in spawned():
+    if (target is None or target.tab.owner != tmux.OWNER
+            or not owns(target.tab.address, int(target.pid or 0))):
         return web.json_response({"note": "Only agents started from the phone can be ended from it."}, status=403)
     await asyncio.get_running_loop().run_in_executor(None, tmux.end, target.tab)
     await asyncio.get_running_loop().run_in_executor(
         None, spawned, lambda alive: [e for e in alive if e.get("pane") != target.tab.address])
+    # A deploy launch often has no session yet. Ending the pane from the phone still has to free that slot.
+    from voice import chains
+    await asyncio.get_running_loop().run_in_executor(
+        None, chains.close_child, session, target.tab.address, int(target.pid or 0))
     # Every name it went by: the same agent in the same pane may be known under its older key too (a Cursor CLI
     # before its chat id was used: ending one name left the other in the list, 2026-11-16)
     for other in (Speaker.load(p) for p in SPEAKERS.glob("*.json")):  # every record, however old

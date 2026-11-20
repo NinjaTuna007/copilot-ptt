@@ -77,5 +77,26 @@ class ToAgent(unittest.TestCase):
             switch.assert_not_called()
 
 
+class Owns(unittest.TestCase):
+    def test_a_missing_pid_does_not_own_the_live_pane(self):
+        server.write_json(server.SPAWNED, {"panes": [{"pane": "%1", "pid": 9}]}, private=True)
+        with mock.patch.object(server.tmux, "pane_pids", return_value={"%1": 9}):
+            self.assertFalse(server.owns("%1", 0))
+            self.assertFalse(server.owns("%1", 7))
+            self.assertTrue(server.owns("%1", 9))
+
+    def test_an_unanswered_tmux_does_not_own_a_saved_pid(self):
+        server.write_json(server.SPAWNED, {"panes": [{"pane": "%1", "pid": 9}]}, private=True)
+        with mock.patch.object(server.tmux, "pane_pids", return_value=None):
+            self.assertFalse(server.owns("%1", 9))
+        self.assertEqual(server.read_json(server.SPAWNED).get("panes"), [{"pane": "%1", "pid": 9}])
+
+    def test_a_replaced_process_is_not_owned(self):
+        server.write_json(server.SPAWNED, {"panes": [{"pane": "%1", "pid": 9}]}, private=True)
+        with mock.patch.object(server.tmux, "pane_pids", return_value={"%1": 12}):
+            self.assertFalse(server.owns("%1", 9))
+            self.assertFalse(server.owns("%1", 12))
+
+
 if __name__ == "__main__":
     unittest.main()

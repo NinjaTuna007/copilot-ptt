@@ -35,6 +35,16 @@
                                        doesn't sleep by itself until it is delivered (a wake-up call); a
                                        closed lid still suspends it. Prints its id
     handsfree remind list | cancel ID   the reminders set, and taking one back
+    handsfree deploy --agent claude|cursor|codex --folder PATH --ask WORDS
+                                       start that agent in a new tmux pane in PATH
+                                       (not a resumed chat) and type WORDS. The
+                                       caller is the boss. The child reports with
+                                       `handsfree report`
+    handsfree report WORDS             the caller is a child: WORDS go to the boss
+                                       that started it, with corrections since the
+                                       last report first. Exit 1 when it has no boss
+    handsfree end SESSION              end that one agent, when it was started from
+                                       here. Siblings are left running
     handsfree send FILE [FILE ...] [WORDS]
                                        show the user files on their phone: in the call's chat while a call
                                        is up, else a Henchline notification (an ntfy one if Henchline can't
@@ -609,6 +619,15 @@ def main() -> int:
                     wait, done, as_session, check, urgent)
     if command == "remind":
         return remind(args)
+    if command == "deploy":
+        from voice.minions import deploy
+        return deploy(args, caller)
+    if command == "report":
+        from voice.minions import report
+        return report(args, caller)
+    if command == "end":
+        from voice.minions import end
+        return end(args)
     if command == "send":
         return send(args)
     if command == "show":
